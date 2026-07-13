@@ -38,6 +38,11 @@ export const api = {
     request<Workspace>(`/api/note-types/${noteTypeId}/fields`, { method: 'POST', body: JSON.stringify({ name }) }),
   deleteField: (noteTypeId: string, order: number) =>
     request<Workspace>(`/api/note-types/${noteTypeId}/fields/${order}`, { method: 'DELETE' }),
+  reorderField: (noteTypeId: string, order: number, newOrder: number) =>
+    request<Workspace>(`/api/note-types/${noteTypeId}/fields/${order}/reorder`, {
+      method: 'POST',
+      body: JSON.stringify({ new_order: newOrder }),
+    }),
   fieldContentSummary: (noteTypeId: string, order: number) =>
     request<{
       field_order: number

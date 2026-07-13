@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { open, save } from '@tauri-apps/plugin-dialog'
 import { writeFile } from '@tauri-apps/plugin-fs'
 import {
-  ArrowLeft, ArrowRight, ArrowRightLeft, BookOpen, Braces, Check, ChevronRight, Code2, Copy,
+  ArrowLeft, ArrowRight, ArrowRightLeft, BookOpen, Braces, Check, ChevronDown, ChevronRight, ChevronUp, Code2, Copy,
   Database, Download, FileArchive, FolderOpen, Grid2X2, HardDrive,
   Image, Layers3, ListChecks, LoaderCircle, Music2, Palette, PanelLeft,
   Play, Plus, Save, Sparkles, Table2, Trash2, Type, X,
@@ -31,10 +31,16 @@ function App() {
   const [busy, setBusy] = useState(false)
   const [dirty, setDirty] = useState(false)
   const [toast, setToast] = useState('')
+  const [toastVisible, setToastVisible] = useState(false)
   const [error, setError] = useState('')
 
   const selected = useMemo(() => workspace?.note_types.find((item) => item.id === selectedId) ?? workspace?.note_types[0], [workspace, selectedId])
-  const notify = useCallback((message: string) => { setToast(message); window.setTimeout(() => setToast(''), 2600) }, [])
+  const notify = useCallback((message: string) => {
+    setToast(message)
+    setToastVisible(true)
+    window.setTimeout(() => setToastVisible(false), 2200)
+    window.setTimeout(() => setToast(''), 2700)
+  }, [])
   const hydrate = useCallback((next: Workspace) => {
     setWorkspace(next); setSelectedId(next.selected_note_type_id ?? next.note_types[0]?.id ?? '')
     setTemplateIndex(0); setNoteIndex(0)
@@ -143,18 +149,18 @@ function App() {
         </div>
       </aside>
       <section className="ml-2 flex h-full min-w-0 flex-1 flex-col overflow-hidden lg:ml-4">
-        <header className="flex h-[64px] shrink-0 items-center justify-between gap-3 px-2 lg:h-[72px] lg:px-3"><div className="min-w-0"><p className="text-[10px] font-bold tracking-[.06em] text-indigo-500">{workspace ? '현재 노트 유형' : 'ANKI 파일 도구'}</p><h1 className="mt-1 truncate text-lg font-semibold tracking-tight lg:text-xl">{selected?.name ?? '안녕하세요! 반갑습니다.'}</h1></div><div className="flex shrink-0 items-center gap-2">{workspace && <button onClick={persist} disabled={busy || !dirty} className={`inline-flex h-9 items-center gap-2 rounded-xl px-3 text-xs font-semibold transition lg:h-10 lg:px-4 ${dirty ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-500/20' : 'border border-slate-200 bg-white text-slate-400'}`}>{busy ? <LoaderCircle className="animate-spin" size={16} /> : <Save size={16} />}{dirty ? '저장' : '저장됨'}<span className="hidden text-[10px] opacity-65 lg:inline">Ctrl+S</span></button>}<button onClick={choosePackage} disabled={busy} className="inline-flex h-9 items-center gap-2 rounded-xl bg-[#11182a] px-3 text-xs font-semibold text-white lg:h-10 lg:px-4"><FolderOpen size={16} /><span className="hidden sm:inline">파일 열기</span></button></div></header>
-        <div className={`min-h-0 flex-1 px-3 pb-4 ${page === 'design' || page === 'media' ? 'overflow-hidden' : 'overflow-y-auto'}`}>{!workspace ? <Welcome onOpen={choosePackage} busy={busy} /> : page === 'overview' ? <Overview workspace={workspace} selected={selected} onPage={setPage} onSelect={setSelectedId} onMoveNotes={async (fromId, toId, mapping) => { try { const result = await api.moveNotes(fromId, toId, mapping); hydrate(result.workspace); setDirty(true); notify(`${result.moved.toLocaleString()}개 카드를 옮겼습니다.`); } catch (caught) { setError(caught instanceof Error ? caught.message : '카드를 옮기지 못했습니다.'); throw caught } }} /> : page === 'data' ? <DataPage noteType={selected} onUpdate={updateCell} /> : page === 'fields' ? <FieldsPage noteType={selected} onRename={(order, name) => mutate(() => api.updateField(selected!.id, order, name))} onAdd={(name) => mutate(() => api.addField(selected!.id, name))} onDelete={(order) => mutate(() => api.deleteField(selected!.id, order))} onMove={async (order, destination, mode) => { const result = await api.moveFieldContents(selected!.id, order, destination, mode); hydrate(result.workspace); setDirty(true); notify(`${result.changed.toLocaleString()}개 노트에서 내용을 이동했습니다.`); return result.changed }} onClone={(name) => mutate(async () => { const next = await api.cloneNoteType(selected!.id, name, true); setPage('overview'); return next }, '카드를 새 노트 유형으로 옮겼습니다. 저장하면 APKG에 반영됩니다.')} /> : page === 'media' ? <MediaPage onExport={() => exportFile('media')} /> : page === 'design' ? <DesignPage noteType={selected} index={templateIndex} setIndex={setTemplateIndex} onSave={(mode, value) => mutate(() => mode === 'css' ? api.updateCss(selected!.id, value) : api.updateTemplate(selected!.id, templateIndex, { [mode]: value }), '카드 디자인을 적용했습니다.')} notify={notify} /> : <PreviewPage noteType={selected} side={side} setSide={setSide} noteIndex={noteIndex} setNoteIndex={setNoteIndex} previewHtml={previewHtml} />}</div>
+        <header className="flex h-[64px] shrink-0 items-center justify-between gap-3 px-2 lg:h-[72px] lg:px-3"><div className="min-w-0">{workspace ? <p className="text-[10px] font-bold tracking-[.06em] text-indigo-500">현재 노트 유형</p> : null}<h1 className={`truncate text-lg font-semibold tracking-tight lg:text-xl ${workspace ? 'mt-1' : ''}`}>{selected?.name ?? '복잡한 Anki 파일, 쉽게.'}</h1></div><div className="flex shrink-0 items-center gap-2">{workspace && <button onClick={persist} disabled={busy || !dirty} className={`inline-flex h-9 items-center gap-2 rounded-xl px-3 text-xs font-semibold transition lg:h-10 lg:px-4 ${dirty ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-500/20' : 'border border-slate-200 bg-white text-slate-400'}`}>{busy ? <LoaderCircle className="animate-spin" size={16} /> : <Save size={16} />}{dirty ? '저장' : '저장됨'}<span className="hidden text-[10px] opacity-65 lg:inline">Ctrl+S</span></button>}<button onClick={choosePackage} disabled={busy} className="inline-flex h-9 items-center gap-2 rounded-xl bg-[#11182a] px-3 text-xs font-semibold text-white lg:h-10 lg:px-4"><FolderOpen size={16} /><span className="hidden sm:inline">파일 열기</span></button></div></header>
+        <div className={`min-h-0 flex-1 px-3 pb-4 ${!workspace || page === 'design' || page === 'media' ? 'overflow-hidden' : 'overflow-y-auto'}`}>{!workspace ? <Welcome onOpen={choosePackage} busy={busy} /> : page === 'overview' ? <Overview workspace={workspace} selected={selected} onPage={setPage} onSelect={setSelectedId} onMoveNotes={async (fromId, toId, mapping) => { try { const result = await api.moveNotes(fromId, toId, mapping); hydrate(result.workspace); setDirty(true); notify(`${result.moved.toLocaleString()}개 카드를 옮겼습니다.`); } catch (caught) { setError(caught instanceof Error ? caught.message : '카드를 옮기지 못했습니다.'); throw caught } }} /> : page === 'data' ? <DataPage noteType={selected} onUpdate={updateCell} /> : page === 'fields' ? <FieldsPage noteType={selected} onRename={(order, name) => mutate(() => api.updateField(selected!.id, order, name))} onAdd={(name) => mutate(() => api.addField(selected!.id, name))} onDelete={(order) => mutate(() => api.deleteField(selected!.id, order))} onReorder={(order, newOrder) => mutate(() => api.reorderField(selected!.id, order, newOrder))} onMove={async (order, destination, mode) => { const result = await api.moveFieldContents(selected!.id, order, destination, mode); hydrate(result.workspace); setDirty(true); notify(`${result.changed.toLocaleString()}개 노트에서 내용을 이동했습니다.`); return result.changed }} onClone={(name) => mutate(async () => { const next = await api.cloneNoteType(selected!.id, name, true); setPage('overview'); return next }, '카드를 새 노트 유형으로 옮겼습니다. 저장하면 APKG에 반영됩니다.')} /> : page === 'media' ? <MediaPage onExport={() => exportFile('media')} /> : page === 'design' ? <DesignPage noteType={selected} index={templateIndex} setIndex={setTemplateIndex} onSave={(mode, value) => mutate(() => mode === 'css' ? api.updateCss(selected!.id, value) : api.updateTemplate(selected!.id, templateIndex, { [mode]: value }), '카드 디자인을 적용했습니다.')} notify={notify} /> : <PreviewPage noteType={selected} side={side} setSide={setSide} noteIndex={noteIndex} setNoteIndex={setNoteIndex} previewHtml={previewHtml} />}</div>
       </section>
     </div>
-    {toast && <div className="fixed bottom-7 left-1/2 z-[70] -translate-x-1/2 rounded-xl bg-[#0b1426] px-5 py-3 text-sm font-semibold text-white shadow-2xl ring-1 ring-white/10"><span className="mr-2 text-emerald-400">✓</span>{toast}</div>}
+    {toast && <div className={`fixed bottom-7 left-1/2 z-[70] -translate-x-1/2 rounded-xl bg-[#0b1426] px-5 py-3 text-sm font-semibold text-white shadow-2xl ring-1 ring-white/10 transition-opacity duration-300 ${toastVisible ? 'opacity-100' : 'opacity-0'}`}><span className="mr-2 text-emerald-400">✓</span>{toast}</div>}
     {error && <Modal title="작업을 완료하지 못했습니다" description={error} tone="danger" confirmLabel="확인" onConfirm={() => setError('')} />}
   </main>
 }
 
 function SideAction({ label, icon: Icon, compact, disabled, onClick }: { label: string; icon: typeof Download; compact: boolean; disabled?: boolean; onClick: () => void }) { return <button disabled={disabled} onClick={onClick} title={label} className="flex h-9 w-full items-center rounded-xl px-3 text-[11px] font-medium text-slate-500 transition hover:bg-white/[.055] hover:text-slate-200 disabled:opacity-30"><Icon size={16} /><span className={`${compact ? 'w-0 opacity-0' : 'ml-3 opacity-100'} whitespace-nowrap transition-all`}>{label}</span></button> }
 
-function Welcome({ onOpen, busy }: { onOpen: () => void; busy: boolean }) { return <div className="relative grid min-h-[calc(100vh-96px)] place-items-center overflow-hidden rounded-[22px] bg-[#0d1425] px-5 lg:min-h-[calc(100vh-110px)] lg:rounded-[28px] lg:px-6"><div className="absolute inset-0 bg-[radial-gradient(ellipse_at_18%_22%,rgba(99,102,241,.32),transparent_36%),radial-gradient(ellipse_at_80%_78%,rgba(20,184,166,.17),transparent_37%)]" /><div className="relative max-w-xl text-center"><div className="mx-auto mb-5 grid h-14 w-14 place-items-center rounded-[19px] bg-white/10 ring-1 ring-white/15 lg:mb-7 lg:h-16 lg:w-16 lg:rounded-[22px]"><Sparkles className="text-violet-200" size={29} /></div><p className="mb-3 text-[11px] font-bold tracking-[.24em] text-indigo-300 lg:mb-4">ANKI HELPER</p><h2 className="text-[34px] font-semibold leading-tight tracking-[-.045em] text-white sm:text-[38px] lg:text-[42px]">파일 하나를 열고<br /><span className="bg-gradient-to-r from-violet-300 to-cyan-200 bg-clip-text text-transparent">바로 작업하세요.</span></h2><p className="mt-4 text-sm leading-6 text-slate-400">APKG와 Anki Helper 편집 프로젝트(.zip)를 모두 열 수 있습니다.</p><button onClick={onOpen} disabled={busy} className="mt-6 inline-flex h-11 items-center gap-2 rounded-xl bg-white px-5 text-sm font-semibold text-slate-900 lg:mt-7 lg:h-12">{busy ? <LoaderCircle className="animate-spin" size={18} /> : <FolderOpen size={18} />}파일 열기</button></div></div> }
+function Welcome({ onOpen, busy }: { onOpen: () => void; busy: boolean }) { return <div className="relative grid h-full min-h-0 place-items-center overflow-hidden rounded-[22px] bg-[#0d1425] px-5 lg:rounded-[28px] lg:px-6"><div className="absolute inset-0 bg-[radial-gradient(ellipse_at_18%_22%,rgba(99,102,241,.32),transparent_36%),radial-gradient(ellipse_at_80%_78%,rgba(20,184,166,.17),transparent_37%)]" /><div className="relative max-w-xl text-center"><div className="mx-auto mb-5 grid h-14 w-14 place-items-center rounded-[19px] bg-white/10 ring-1 ring-white/15 lg:mb-7 lg:h-16 lg:w-16 lg:rounded-[22px]"><Sparkles className="text-violet-200" size={29} /></div><h2 className="text-[34px] font-semibold leading-[1.2] tracking-[-.045em] text-white sm:text-[38px] lg:text-[42px]">복잡한 Anki 파일,<br /><span className="bg-gradient-to-r from-violet-300 to-cyan-200 bg-clip-text text-transparent">누구보다 쉽게 다루세요.</span></h2><p className="mt-4 text-sm leading-6 text-slate-400">APKG와 Anki Helper 편집 프로젝트(.zip)를 모두 열 수 있습니다.</p><button onClick={onOpen} disabled={busy} className="mt-6 inline-flex h-11 items-center gap-2 rounded-xl bg-white px-5 text-sm font-semibold text-slate-900 lg:mt-7 lg:h-12">{busy ? <LoaderCircle className="animate-spin" size={18} /> : <FolderOpen size={18} />}파일 열기</button></div></div> }
 
 function defaultFieldMapping(source: NoteType, destination: NoteType): Record<number, number> {
   const mapping: Record<number, number> = {}
@@ -343,25 +349,45 @@ function mediaFilename(value: string) {
   return sound?.[1] ?? image?.[1]?.split(/[\\/]/).pop()
 }
 
+function splitCellContent(value: string) {
+  const sound = value.match(/\[sound:([^\]]+)\]/i)
+  const filename = mediaFilename(value)
+  const text = value
+    .replace(/\[sound:[^\]]+\]/gi, ' ')
+    .replace(/<img\b[^>]*>/gi, ' ')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/[ \t]{2,}/g, ' ')
+    .trim()
+  return { text, filename, isSound: Boolean(sound) }
+}
+
 function DataPage({ noteType, onUpdate }: { noteType?: NoteType; onUpdate: (row: number, fieldOrder: number, value: string) => Promise<void> }) {
   const columns = useMemo(() => {
     if (!noteType) return []
     return noteType.fields.map((field) => {
       const values = noteType.notes.slice(0, 300).map((row) => row[field.order] ?? '')
       const populated = values.filter((value) => value.trim())
-      const mediaMatches = populated.filter((value) => Boolean(mediaFilename(value))).length
+      const mediaOnly = populated.filter((value) => {
+        const parts = splitCellContent(value)
+        return Boolean(parts.filename) && !parts.text
+      }).length
+      const mixed = populated.filter((value) => {
+        const parts = splitCellContent(value)
+        return Boolean(parts.filename) && Boolean(parts.text)
+      }).length
       const mediaName = /^(sound|audio|voice|media|image|photo|음성|소리|미디어|이미지)$/i.test(field.name.trim())
-      const media = mediaName || (populated.length > 0 && mediaMatches / populated.length >= 0.7)
+      // Only treat as media-only column when cells are mostly media without accompanying text.
+      const media = mediaName || (populated.length > 0 && mediaOnly / populated.length >= 0.7 && mixed / populated.length < 0.3)
       if (media) return { media: true, minWidth: 184, track: '184px' }
 
-      const lengths = populated.map((value) => value.replace(/<[^>]*>/g, '').trim().length).sort((a, b) => a - b)
+      const lengths = populated.map((value) => splitCellContent(value).text.replace(/<[^>]*>/g, '').trim().length || value.replace(/<[^>]*>/g, '').trim().length).sort((a, b) => a - b)
       const typical = lengths.length ? lengths[Math.min(lengths.length - 1, Math.floor(lengths.length * 0.85))] : field.name.length
       const density = values.length ? populated.length / values.length : 0
       const effectiveLength = typical * (0.25 + density * 0.75)
       const primaryText = density > 0.1 && /(meaning|definition|example|sentence|뜻|의미|예문|설명)/i.test(field.name)
       const secondaryText = density > 0.1 && /^(note|memo|비고|메모)$/i.test(field.name)
-      const minWidth = Math.max(primaryText ? 160 : 112, Math.min(224, 92 + effectiveLength * 4))
-      const weight = Math.max(0.8, Math.min(2.7, 0.75 + effectiveLength / 13 + (primaryText ? 0.55 : secondaryText ? 0.1 : 0)))
+      const minWidth = Math.max(primaryText ? 160 : mixed > 0 ? 200 : 112, Math.min(260, 92 + effectiveLength * 4))
+      const weight = Math.max(0.8, Math.min(2.7, 0.75 + effectiveLength / 13 + (primaryText ? 0.55 : secondaryText ? 0.1 : 0) + (mixed > 0 ? 0.35 : 0)))
       return { media: false, minWidth, track: `minmax(${minWidth}px, ${weight.toFixed(2)}fr)` }
     })
   }, [noteType])
@@ -381,15 +407,21 @@ function DataPage({ noteType, onUpdate }: { noteType?: NoteType; onUpdate: (row:
   </section>
 }
 
+function MediaChip({ filename, isSound }: { filename: string; isSound: boolean }) {
+  const MediaIcon = isSound ? Music2 : Image
+  return <button onClick={() => { sessionStorage.setItem('ankihelper:media-focus', filename); window.dispatchEvent(new CustomEvent('ankihelper:navigate', { detail: 'media' })) }} title="미디어 관리에서 확인" className="inline-flex h-8 max-w-full min-w-0 items-center gap-1.5 rounded-lg bg-violet-50 px-2 text-left text-[11px] font-semibold text-violet-700 hover:bg-violet-100">
+    <MediaIcon size={13} className="shrink-0" /><span className="min-w-0 truncate">{filename}</span><ArrowRight size={12} className="shrink-0 opacity-60" />
+  </button>
+}
+
 function DataValue({ row, fieldOrder, value = '', onUpdate }: { row: number; fieldOrder: number; value?: string; onUpdate: (row: number, fieldOrder: number, value: string) => Promise<void> }) {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(value)
   const [saving, setSaving] = useState(false)
   const skipBlur = useRef(false)
   useEffect(() => { if (!editing) setDraft(value) }, [value, editing])
-  const sound = value.match(/\[sound:([^\]]+)\]/i)
-  const filename = mediaFilename(value)
-  if (filename) { const MediaIcon = sound ? Music2 : Image; return <button onClick={() => { sessionStorage.setItem('ankihelper:media-focus', filename); window.dispatchEvent(new CustomEvent('ankihelper:navigate', { detail: 'media' })) }} title="미디어 셀은 미디어 관리에서 확인할 수 있습니다" className="inline-flex h-9 w-full min-w-0 items-center gap-2 rounded-lg bg-violet-50 px-2.5 text-left text-xs font-semibold text-violet-700 hover:bg-violet-100"><MediaIcon size={14} className="shrink-0" /><span className="min-w-0 flex-1 truncate">{filename}</span><ArrowRight size={13} className="shrink-0 opacity-60" /></button> }
+  const { text, filename, isSound } = splitCellContent(value)
+
   const commit = async () => {
     if (saving) return
     if (draft === value) { setEditing(false); return }
@@ -398,15 +430,31 @@ function DataValue({ row, fieldOrder, value = '', onUpdate }: { row: number; fie
     catch { /* 상위 화면의 공통 오류 창에서 안내하고 편집 상태는 유지합니다. */ }
     finally { setSaving(false) }
   }
+
   if (editing) return <textarea autoFocus rows={Math.min(4, Math.max(1, draft.split('\n').length))} value={draft} onChange={(event) => setDraft(event.target.value)} onBlur={() => { if (skipBlur.current) { skipBlur.current = false; return } void commit() }} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); event.currentTarget.blur() } else if (event.key === 'Escape') { event.preventDefault(); skipBlur.current = true; setDraft(value); setEditing(false) } }} disabled={saving} className="min-h-9 w-full resize-none rounded-lg border border-indigo-300 bg-white px-2.5 py-2 text-sm leading-5 text-slate-700 outline-none ring-2 ring-indigo-100" />
+
+  // Media only: keep the compact media chip.
+  if (filename && !text) return <MediaChip filename={filename} isSound={isSound} />
+
+  // Text + media: show both so AwesomeTTS mixups are visible.
+  if (filename && text) {
+    return <div className="flex min-h-9 w-full flex-col gap-1.5 rounded-lg px-1.5 py-1.5 hover:bg-indigo-50">
+      <button onDoubleClick={() => setEditing(true)} title="더블클릭하여 수정" className="w-full text-left leading-5">
+        <span className="line-clamp-2 whitespace-pre-wrap text-slate-700">{text}</span>
+      </button>
+      <MediaChip filename={filename} isSound={isSound} />
+    </div>
+  }
+
   return <button onDoubleClick={() => setEditing(true)} title="더블클릭하여 수정" className="block min-h-9 w-full rounded-lg px-2.5 py-2 text-left leading-5 hover:bg-indigo-50">{value ? <span className="line-clamp-2 whitespace-pre-wrap">{value}</span> : <span className="text-slate-300">—</span>}</button>
 }
 
-function FieldsPage({ noteType, onRename, onAdd, onDelete, onMove, onClone }: {
+function FieldsPage({ noteType, onRename, onAdd, onDelete, onReorder, onMove, onClone }: {
   noteType?: NoteType
   onRename: (order: number, name: string) => Promise<void>
   onAdd: (name: string) => Promise<void>
   onDelete: (order: number) => Promise<void>
+  onReorder: (order: number, newOrder: number) => Promise<void>
   onMove: (order: number, destination: number, mode: 'text' | 'media' | 'all') => Promise<number>
   onClone: (name: string) => Promise<void>
 }) {
@@ -478,15 +526,19 @@ function FieldsPage({ noteType, onRename, onAdd, onDelete, onMove, onClone }: {
 
   return <div className="mx-auto max-w-[1420px] space-y-5">
     <Card title="필드 구성">
-      <p className="-mt-2 mb-5 text-sm text-slate-400">이름을 바꾸면 카드 디자인의 필드 참조도 함께 바뀝니다. 내용이 잘못된 칸에 들어갔다면 이동 버튼으로 텍스트와 미디어를 옮길 수 있습니다.</p>
+      <p className="-mt-2 mb-5 text-sm text-slate-400">이름을 바꾸면 카드 디자인의 필드 참조도 함께 바뀝니다. 위·아래 버튼으로 순서를 바꾸고, 내용이 잘못된 칸에 들어갔다면 이동 버튼으로 텍스트와 미디어를 옮길 수 있습니다.</p>
       <div className="mb-5 overflow-auto rounded-xl border border-slate-200">
         <table className="min-w-full text-left text-sm">
           <thead className="bg-slate-50 text-xs text-slate-400"><tr>{noteType.fields.map((field) => <th key={field.order} className="px-3 py-2 font-semibold">{field.name}</th>)}</tr></thead>
           <tbody>{noteType.notes.slice(0, 2).map((row, index) => <tr key={index} className="border-t border-slate-100">{noteType.fields.map((field) => <td key={field.order} className="max-w-[180px] truncate px-3 py-2 text-slate-600">{row[field.order] || '—'}</td>)}</tr>)}</tbody>
         </table>
       </div>
-      <div className="grid gap-2 md:grid-cols-2">{noteType.fields.map((field) => (
+      <div className="grid gap-2 md:grid-cols-2">{noteType.fields.map((field, index) => (
         <div key={`${field.order}-${field.name}`} className="flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2">
+          <div className="flex flex-col">
+            <button title="위로" disabled={index === 0} onClick={() => void onReorder(field.order, field.order - 1)} className="rounded p-0.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700 disabled:opacity-20"><ChevronUp size={14} /></button>
+            <button title="아래로" disabled={index >= noteType.fields.length - 1} onClick={() => void onReorder(field.order, field.order + 1)} className="rounded p-0.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700 disabled:opacity-20"><ChevronDown size={14} /></button>
+          </div>
           <span className="w-7 text-xs font-bold text-slate-400">{String(field.order + 1).padStart(2, '0')}</span>
           <input defaultValue={field.name} onBlur={(event) => { const value = event.currentTarget.value.trim(); if (value && value !== field.name) void onRename(field.order, value) }} className="min-w-0 flex-1 bg-transparent text-sm font-medium outline-none" />
           <button title="내용 이동" onClick={() => void openMove(field)} className="rounded-lg p-2 text-indigo-600 hover:bg-indigo-50"><ArrowRightLeft size={15} /></button>
@@ -503,7 +555,13 @@ function FieldsPage({ noteType, onRename, onAdd, onDelete, onMove, onClone }: {
       <p className="-mt-2 mb-4 text-sm leading-6 text-slate-400">지금 구성을 <b className="font-semibold text-slate-600">새 노트 유형</b>으로 만들고, <b className="font-semibold text-slate-600">카드도 함께 옮깁니다</b>. 원래 유형은 카드 0개가 됩니다.<br />Anki에서 기존 공유 유형을 덮어쓰지 않으려면 이 방법이 안전합니다.</p>
       <div className="flex gap-2">
         <input value={cloneName} onChange={(event) => setCloneName(event.target.value)} placeholder="새 노트 유형 이름" className="min-w-0 flex-1 rounded-xl border border-slate-200 px-3 py-2.5 text-sm outline-none" />
-        <button onClick={async () => { if (cloneName.trim()) { await onClone(cloneName.trim()); setCloneName('') } }} className="rounded-xl border border-indigo-200 px-4 text-sm font-semibold text-indigo-700">저장</button>
+        <button
+          disabled={!cloneName.trim()}
+          onClick={async () => { if (cloneName.trim()) { await onClone(cloneName.trim()); setCloneName('') } }}
+          className={`rounded-xl border px-4 text-sm font-semibold transition ${cloneName.trim() ? 'border-indigo-200 text-indigo-700 hover:bg-indigo-50' : 'cursor-not-allowed border-slate-200 text-slate-300'}`}
+        >
+          저장
+        </button>
       </div>
     </Card>
 
@@ -531,7 +589,7 @@ function FieldsPage({ noteType, onRename, onAdd, onDelete, onMove, onClone }: {
           {moveStep === 'payload' && destination && (
             <>
               <h3 className="text-lg font-semibold">무엇을 옮길까요?</h3>
-              <p className="mt-2 text-sm leading-6 text-slate-500">‘{moving.name}’에는 텍스트와 미디어가 섞여 있습니다. 예: {summary?.sample_text || '텍스트'} + {summary?.sample_media || '[sound:…]'}</p>
+              <p className="mt-2 text-sm leading-6 text-slate-500">‘{moving.name}’에는 텍스트와 미디어가 섞여 있습니다. 예: {summary?.sample_text || '텍스트'} + {summary?.sample_media || '사운드/이미지 태그'}</p>
               <div className="mt-5 grid gap-3">
                 <button disabled={busyMove} onClick={() => choosePayload('text')} className="flex items-center gap-3 rounded-2xl border border-slate-200 px-4 py-3 text-left hover:border-indigo-300 hover:bg-indigo-50">
                   <span className="grid h-11 w-11 place-items-center rounded-xl bg-amber-100 text-amber-700"><Type size={20} /></span>
@@ -539,7 +597,7 @@ function FieldsPage({ noteType, onRename, onAdd, onDelete, onMove, onClone }: {
                 </button>
                 <button disabled={busyMove} onClick={() => choosePayload('media')} className="flex items-center gap-3 rounded-2xl border border-slate-200 px-4 py-3 text-left hover:border-indigo-300 hover:bg-indigo-50">
                   <span className="grid h-11 w-11 place-items-center rounded-xl bg-violet-100 text-violet-700"><Music2 size={20} /></span>
-                  <span><b className="block text-sm text-slate-800">미디어만</b><small className="text-xs text-slate-400">[sound:…] / 이미지 태그만 ‘{destination.name}’으로</small></span>
+                  <span><b className="block text-sm text-slate-800">미디어만</b><small className="text-xs text-slate-400">사운드 태그 / 이미지 태그만 ‘{destination.name}’으로</small></span>
                 </button>
                 <button disabled={busyMove} onClick={() => choosePayload('all')} className="flex items-center gap-3 rounded-2xl border border-slate-200 px-4 py-3 text-left hover:border-indigo-300 hover:bg-indigo-50">
                   <span className="grid h-11 w-11 place-items-center rounded-xl bg-slate-900 text-white"><ArrowRightLeft size={20} /></span>

@@ -346,12 +346,17 @@ def _note_checksum(value: str) -> int:
 
 
 def split_field_content(value: str) -> tuple[str, str]:
-    """Separate plain text from Anki media markers in one field cell."""
-    media_parts = MEDIA_TOKEN.findall(value or "")
-    text = MEDIA_TOKEN.sub(" ", value or "")
+    """Separate plain text from Anki media markers in one field cell.
+
+    Media tokens (`[sound:…]`, `<img …>`) are returned exactly as stored so
+    playback filenames stay intact after move/split operations.
+    """
+    raw = value or ""
+    media_parts = [match.group(0) for match in MEDIA_TOKEN.finditer(raw)]
+    text = MEDIA_TOKEN.sub(" ", raw)
     text = re.sub(r"[ \t]+\n", "\n", text)
     text = re.sub(r"[ \t]{2,}", " ", text).strip()
-    media = " ".join(part.strip() for part in media_parts if part.strip()).strip()
+    media = " ".join(media_parts).strip()
     return text, media
 
 
@@ -364,6 +369,12 @@ def field_content_kind(value: str) -> Literal["empty", "text", "media", "mixed"]
     if text:
         return "text"
     return "empty"
+
+
+def _join_field_parts(text: str, media: str) -> str:
+    """Rebuild a cell as text then media tags, without altering tag contents."""
+    parts = [part for part in (text.strip(), media.strip()) if part]
+    return " ".join(parts).strip()
 
 
 def move_field_piece(source: str, destination: str, mode: Literal["text", "media", "all"]) -> tuple[str, str]:
@@ -387,13 +398,33 @@ def move_field_piece(source: str, destination: str, mode: Literal["text", "media
     else:
         if not source_media:
             return source or "", destination or ""
+        # Keep each [sound:…] / <img> token verbatim; only separate tokens with spaces.
         dest_media = f"{dest_media} {source_media}".strip() if dest_media else source_media
         source_media = ""
 
-    def join_parts(text: str, media: str) -> str:
-        return " ".join(part for part in (text, media) if part).strip()
+    return _join_field_parts(source_text, source_media), _join_field_parts(dest_text, dest_media)
 
-    return join_parts(source_text, source_media), join_parts(dest_text, dest_media)
+
+def reorder_field(note_type: NoteType, field_order: int, new_order: int) -> None:
+    """Move a field to a new index and keep note values aligned with field order."""
+    count = len(note_type.fields)
+    if not 0 <= field_order < count:
+        raise ValueError("필드를 찾지 못했습니다.")
+    if not 0 <= new_order < count:
+        raise ValueError("올바른 필드 위치가 아닙니다.")
+    if field_order == new_order:
+        return
+
+    field = note_type.fields.pop(field_order)
+    note_type.fields.insert(new_order, field)
+    for index, item in enumerate(note_type.fields):
+        item.order = index
+
+    for values in note_type.notes:
+        while len(values) < count:
+            values.append("")
+        value = values.pop(field_order)
+        values.insert(new_order, value)
 
 
 def move_note_field_contents(
@@ -630,10 +661,16 @@ def _write_legacy_changes(connection: sqlite3.Connection, package: DeckPackage) 
         if model is None:
             continue
         original_fields = model.get("flds", [])
-        model["flds"] = [
-            {**(original_fields[index] if index < len(original_fields) else {"font": "Arial", "size": 20, "rtl": False, "sticky": False}), "name": field.name, "ord": index}
-            for index, field in enumerate(note_type.fields)
-        ]
+        fields_by_name = {item.get("name"): item for item in original_fields if isinstance(item, dict)}
+        model["flds"] = []
+        for index, field in enumerate(note_type.fields):
+            base = fields_by_name.get(field.name)
+            if base is None and index < len(original_fields) and isinstance(original_fields[index], dict):
+                # Fall back to position only when the name is brand-new.
+                base = original_fields[index] if original_fields[index].get("name") == field.name else None
+            if base is None:
+                base = {"font": "Arial", "size": 20, "rtl": False, "sticky": False}
+            model["flds"].append({**base, "name": field.name, "ord": index})
         original_templates = model.get("tmpls", [])
         for index, template in enumerate(note_type.templates):
             if index < len(original_templates):
@@ -672,10 +709,11 @@ def _write_normalized_changes(connection: sqlite3.Connection, package: DeckPacka
         if not note_type.id.isdigit():
             continue
         type_id = int(note_type.id)
-        existing = connection.execute("SELECT ord, config FROM fields WHERE ntid=? ORDER BY ord", (type_id,)).fetchall()
+        existing = connection.execute("SELECT ord, name, config FROM fields WHERE ntid=? ORDER BY ord", (type_id,)).fetchall()
+        existing_by_name = {name: config for _ord, name, config in existing}
         connection.execute("DELETE FROM fields WHERE ntid=?", (type_id,))
         for index, field in enumerate(note_type.fields):
-            config = existing[index][1] if index < len(existing) else b""
+            config = existing_by_name.get(field.name, b"")
             connection.execute("INSERT INTO fields (ntid, ord, name, config) VALUES (?, ?, ?, ?)", (type_id, index, field.name, config))
         for index, template in enumerate(note_type.templates):
             row = connection.execute("SELECT config FROM templates WHERE ntid=? AND ord=?", (type_id, index)).fetchone()

@@ -41,6 +41,7 @@ from .anki_package import (
     move_notes_between_types,
     read_apkg,
     render_template,
+    reorder_field,
     save_apkg,
     save_as_note_type,
     split_field_content,
@@ -107,6 +108,10 @@ class NoteTypeMoveNotes(BaseModel):
 class FieldMove(BaseModel):
     destination_order: int
     mode: Literal["text", "media", "all"] = "all"
+
+
+class FieldReorder(BaseModel):
+    new_order: int
 
 
 class SavePackageRequest(BaseModel):
@@ -385,6 +390,16 @@ def move_field_contents(note_type_id: str, field_order: int, payload: FieldMove)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     workspace = _workspace_data() or {}
     return {"workspace": workspace, "changed": changed}
+
+
+@app.post("/api/note-types/{note_type_id}/fields/{field_order}/reorder")
+def reorder_note_field(note_type_id: str, field_order: int, payload: FieldReorder) -> dict:
+    note_type = _get_note_type(note_type_id)
+    try:
+        reorder_field(note_type, field_order, payload.new_order)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _workspace_data() or {}
 
 
 @app.patch("/api/note-types/{note_type_id}/notes/{note_index}/fields/{field_order}")
