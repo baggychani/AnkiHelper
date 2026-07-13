@@ -36,11 +36,129 @@ fn should_start_maximized(window: &WebviewWindow) -> bool {
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
+#[cfg(windows)]
+use std::sync::OnceLock;
 
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
+#[cfg(windows)]
+const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: u32 = 0x0000_2000;
+#[cfg(windows)]
+const JOB_OBJECT_EXTENDED_LIMIT_INFORMATION: u32 = 9;
 
 struct BackendProcess(Mutex<Option<Child>>);
+
+#[cfg(windows)]
+fn backend_job() -> isize {
+    static JOB: OnceLock<isize> = OnceLock::new();
+    *JOB.get_or_init(|| {
+        #[repr(C)]
+        struct IoCounters {
+            read_operation_count: u64,
+            write_operation_count: u64,
+            other_operation_count: u64,
+            read_transfer_count: u64,
+            write_transfer_count: u64,
+            other_transfer_count: u64,
+        }
+        #[repr(C)]
+        struct JobObjectBasicLimitInformation {
+            per_process_user_time_limit: i64,
+            per_job_user_time_limit: i64,
+            limit_flags: u32,
+            minimum_working_set_size: usize,
+            maximum_working_set_size: usize,
+            active_process_limit: u32,
+            affinity: usize,
+            priority_class: u32,
+            scheduling_class: u32,
+        }
+        #[repr(C)]
+        struct JobObjectExtendedLimitInformationStruct {
+            basic_limit_information: JobObjectBasicLimitInformation,
+            io_info: IoCounters,
+            process_memory_limit: usize,
+            job_memory_limit: usize,
+            peak_process_memory_used: usize,
+            peak_job_memory_used: usize,
+        }
+
+        extern "system" {
+            fn CreateJobObjectW(attributes: *mut core::ffi::c_void, name: *const u16) -> isize;
+            fn SetInformationJobObject(
+                job: isize,
+                info_class: u32,
+                info: *mut core::ffi::c_void,
+                length: u32,
+            ) -> i32;
+        }
+
+        unsafe {
+            let job = CreateJobObjectW(core::ptr::null_mut(), core::ptr::null());
+            if job == 0 || job == -1 {
+                return 0;
+            }
+            let mut info = JobObjectExtendedLimitInformationStruct {
+                basic_limit_information: JobObjectBasicLimitInformation {
+                    per_process_user_time_limit: 0,
+                    per_job_user_time_limit: 0,
+                    limit_flags: JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+                    minimum_working_set_size: 0,
+                    maximum_working_set_size: 0,
+                    active_process_limit: 0,
+                    affinity: 0,
+                    priority_class: 0,
+                    scheduling_class: 0,
+                },
+                io_info: IoCounters {
+                    read_operation_count: 0,
+                    write_operation_count: 0,
+                    other_operation_count: 0,
+                    read_transfer_count: 0,
+                    write_transfer_count: 0,
+                    other_transfer_count: 0,
+                },
+                process_memory_limit: 0,
+                job_memory_limit: 0,
+                peak_process_memory_used: 0,
+                peak_job_memory_used: 0,
+            };
+            let ok = SetInformationJobObject(
+                job,
+                JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
+                &mut info as *mut _ as *mut core::ffi::c_void,
+                std::mem::size_of_val(&info) as u32,
+            );
+            if ok == 0 {
+                0
+            } else {
+                job
+            }
+        }
+    })
+}
+
+#[cfg(windows)]
+fn attach_backend_to_job(child: &Child) {
+    let job = backend_job();
+    if job == 0 {
+        return;
+    }
+    extern "system" {
+        fn AssignProcessToJobObject(job: isize, process: isize) -> i32;
+        fn OpenProcess(access: u32, inherit: i32, process_id: u32) -> isize;
+        fn CloseHandle(handle: isize) -> i32;
+    }
+    const PROCESS_SET_QUOTA: u32 = 0x0100;
+    const PROCESS_TERMINATE: u32 = 0x0001;
+    unsafe {
+        let handle = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, 0, child.id());
+        if handle != 0 {
+            let _ = AssignProcessToJobObject(job, handle);
+            let _ = CloseHandle(handle);
+        }
+    }
+}
 
 fn exe_dir() -> Option<PathBuf> {
     env::current_exe()
@@ -71,9 +189,12 @@ fn bundled_backend() -> Option<PathBuf> {
 fn spawn_process(mut command: Command) -> Result<Child, String> {
     #[cfg(windows)]
     command.creation_flags(CREATE_NO_WINDOW);
-    command
+    let child = command
         .spawn()
-        .map_err(|error| format!("Could not start the Anki Helper engine: {error}"))
+        .map_err(|error| format!("Could not start the Anki Helper engine: {error}"))?;
+    #[cfg(windows)]
+    attach_backend_to_job(&child);
+    Ok(child)
 }
 
 fn free_backend_port() {
@@ -83,7 +204,7 @@ fn free_backend_port() {
             .args([
                 "-NoProfile",
                 "-Command",
-                "Get-NetTCPConnection -LocalPort 8765 -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }",
+                "Get-NetTCPConnection -LocalPort 8765 -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }; Get-Process -Name 'anki-helper-backend' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue",
             ])
             .creation_flags(CREATE_NO_WINDOW)
             .status();

@@ -76,6 +76,27 @@ Var NoShortcutMode
 Var WixMode
 Var OldMainBinaryName
 
+; Stop sidecar and legacy main binaries before overwrite. A crashed UI often leaves
+; anki-helper-backend.exe running, which blocks NSIS from updating files in $INSTDIR.
+!macro KillAnkiHelperLeftovers
+  !if "${INSTALLMODE}" == "currentUser"
+    nsis_tauri_utils::KillProcessCurrentUser "anki-helper-backend.exe"
+    Pop $R9
+    nsis_tauri_utils::KillProcessCurrentUser "anki-helper.exe"
+    Pop $R9
+    nsis_tauri_utils::KillProcessCurrentUser "Anki-Helper.exe"
+    Pop $R9
+  !else
+    nsis_tauri_utils::KillProcess "anki-helper-backend.exe"
+    Pop $R9
+    nsis_tauri_utils::KillProcess "anki-helper.exe"
+    Pop $R9
+    nsis_tauri_utils::KillProcess "Anki-Helper.exe"
+    Pop $R9
+  !endif
+  Sleep 500
+!macroend
+
 Name "${PRODUCTNAME}"
 BrandingText "${COPYRIGHT}"
 OutFile "${OUTFILE}"
@@ -610,10 +631,15 @@ Section Install
  !insertmacro NSIS_HOOK_PREINSTALL
  !endif
 
+ !insertmacro KillAnkiHelperLeftovers
  !insertmacro CheckIfAppIsRunning "${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
 
  ; Copy main executable
  File "${MAINBINARYSRCPATH}"
+
+ ; Older builds may have written product-name binaries; remove them on upgrade.
+ Delete "$INSTDIR\Anki-Helper.exe"
+ Delete "$INSTDIR\Anki Helper.exe"
 
  ; Copy resources
  {{#each resources_dirs}}
@@ -747,6 +773,7 @@ Section Uninstall
  !insertmacro NSIS_HOOK_PREUNINSTALL
  !endif
 
+ !insertmacro KillAnkiHelperLeftovers
  !insertmacro CheckIfAppIsRunning "${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
 
  ; Delete the app directory and its content from disk

@@ -1,7 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Anki Helper",
-  "version": "1.1.1",
+  "mainBinaryName": "anki-helper",
+  "version": "1.1.2",
   "identifier": "com.baegichan.ankihelper",
   "build": {
     "beforeDevCommand": "npm run dev",
