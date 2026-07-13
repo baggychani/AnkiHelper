@@ -4,6 +4,12 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+frontend/node_modules/
+frontend/src-tauri/target/
+frontend/src-tauri/gen/
+frontend/src-tauri/binaries/*.exe
+AnkiHelper Backups/
+integration.apkg
 .agents/
 .DS_Store
 Thumbs.db

@@ -1,12 +1,12 @@
 [project]
 name = "anki-helper"
-version = "0.1.0"
-description = "Anki APKG inspector and export helper"
+version = "1.0.0"
+description = "Desktop editor for Anki APKG packages"
 requires-python = ">=3.10"
-dependencies = ["PySide6>=6.7", "PySide6-WebEngine>=6.7", "zstandard>=0.23"]
+dependencies = ["fastapi>=0.115", "uvicorn[standard]>=0.32", "zstandard>=0.23"]
 
 [project.scripts]
-anki-helper = "anki_helper.app:main"
+anki-helper = "anki_helper.backend:main"
 
 [build-system]
 requires = ["setuptools>=68"]

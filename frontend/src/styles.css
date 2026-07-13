@@ -1,0 +1,30 @@
+@import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * { box-sizing: border-box; }
+  html { background: #eef1f7; }
+  body { margin: 0; min-width: 320px; font-family: 'Manrope', 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif; }
+  button { font: inherit; }
+  textarea { font-family: 'DM Mono', ui-monospace, SFMono-Regular, Consolas, monospace; }
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-thumb { border: 3px solid transparent; border-radius: 10px; background: rgba(100, 116, 139, .32); background-clip: padding-box; }
+}
+
+button:focus-visible, input:focus-visible, textarea:focus-visible {
+  outline: 2px solid rgba(99, 102, 241, .55);
+  outline-offset: 2px;
+}
+
+/* Card-design tabs should hug their labels instead of stretching across the toolbar. */
+.flex.shrink-0.items-center.justify-between > div:first-child > .flex.rounded-xl.bg-slate-100 {
+  display: inline-flex;
+  width: auto;
+}
+
+@media (max-height: 720px) {
+  .sidebar-version { display: none; }
+}
