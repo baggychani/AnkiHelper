@@ -22,6 +22,7 @@ SOURCE_MARKERS = (
     ROOT / "src" / "anki_helper" / "backend.py",
     ROOT / "src" / "anki_helper" / "anki_package.py",
 )
+DEV_PORTS = (1420, 8765)
 
 
 def release_is_stale() -> bool:
@@ -31,18 +32,37 @@ def release_is_stale() -> bool:
     return any(path.is_file() and path.stat().st_mtime > built_at for path in SOURCE_MARKERS)
 
 
+def free_dev_ports() -> None:
+    """Stop leftover Vite/backend listeners so ``tauri dev`` can bind cleanly."""
+    if sys.platform != "win32":
+        return
+    ports = ",".join(str(port) for port in DEV_PORTS)
+    script = (
+        f"Get-NetTCPConnection -LocalPort {ports} -State Listen -ErrorAction SilentlyContinue "
+        "| ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }"
+    )
+    subprocess.run(
+        ["powershell", "-NoProfile", "-Command", script],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
 def launch_release() -> None:
     if not DESKTOP_APP.is_file():
         raise SystemExit(
             "데스크톱 앱이 아직 빌드되지 않았습니다. "
             "frontend 폴더에서 `npm run tauri build`를 먼저 실행하세요."
         )
+    free_dev_ports()
     subprocess.Popen([str(DESKTOP_APP)], cwd=ROOT)
 
 
 def launch_dev() -> None:
     if not (FRONTEND / "node_modules").is_dir():
         raise SystemExit("frontend에서 `npm install`을 먼저 실행하세요.")
+    free_dev_ports()
     subprocess.Popen(["npm", "run", "tauri", "dev"], cwd=FRONTEND, shell=True)
 
 

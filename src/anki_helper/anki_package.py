@@ -13,7 +13,7 @@ import zlib
 from copy import deepcopy
 from datetime import datetime
 import zipfile
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
@@ -55,6 +55,7 @@ class DeckPackage:
     archive_entries: set[str]
     database_name: str
     note_ids: dict[str, list[int]]
+    removed_note_type_ids: list[str] = field(default_factory=list)
 
 
 class ApkgReadError(RuntimeError):
@@ -528,6 +529,47 @@ def save_as_note_type(package: DeckPackage, source: NoteType, name: str, *, move
     return copied
 
 
+def remove_note_type(package: DeckPackage, note_type_id: str) -> None:
+    """Remove an empty note type from the working package."""
+    index = next((i for i, item in enumerate(package.note_types) if item.id == note_type_id), None)
+    if index is None:
+        raise ValueError("노트 유형을 찾지 못했습니다.")
+    if len(package.note_types) <= 1:
+        raise ValueError("노트 유형은 하나 이상 남겨야 합니다.")
+    note_type = package.note_types[index]
+    if note_type.notes:
+        raise ValueError("카드가 있는 노트 유형은 제거할 수 없습니다. 먼저 카드를 옮기세요.")
+    if package.note_ids.get(note_type_id):
+        raise ValueError("카드가 있는 노트 유형은 제거할 수 없습니다. 먼저 카드를 옮기세요.")
+    del package.note_types[index]
+    package.note_ids.pop(note_type_id, None)
+    package.removed_note_type_ids.append(note_type_id)
+
+
+def _purge_removed_note_types_legacy(connection: sqlite3.Connection, package: DeckPackage, models: dict[str, Any]) -> None:
+    for removed_id in package.removed_note_type_ids:
+        models.pop(removed_id, None)
+        if not str(removed_id).isdigit():
+            continue
+        mid = int(removed_id)
+        connection.execute("DELETE FROM cards WHERE nid IN (SELECT id FROM notes WHERE mid=?)", (mid,))
+        connection.execute("DELETE FROM notes WHERE mid=?", (mid,))
+    package.removed_note_type_ids.clear()
+
+
+def _purge_removed_note_types_normalized(connection: sqlite3.Connection, package: DeckPackage) -> None:
+    for removed_id in package.removed_note_type_ids:
+        if not str(removed_id).isdigit():
+            continue
+        type_id = int(removed_id)
+        connection.execute("DELETE FROM cards WHERE nid IN (SELECT id FROM notes WHERE mid=?)", (type_id,))
+        connection.execute("DELETE FROM notes WHERE mid=?", (type_id,))
+        connection.execute("DELETE FROM templates WHERE ntid=?", (type_id,))
+        connection.execute("DELETE FROM fields WHERE ntid=?", (type_id,))
+        connection.execute("DELETE FROM notetypes WHERE id=?", (type_id,))
+    package.removed_note_type_ids.clear()
+
+
 def _alloc_note_id(connection: sqlite3.Connection) -> int:
     note_id = int(connection.execute("SELECT COALESCE(MAX(id), 0) FROM notes").fetchone()[0]) + 1
     while connection.execute("SELECT 1 FROM notes WHERE id=?", (note_id,)).fetchone():
@@ -570,9 +612,13 @@ def _sync_note_rows_legacy(connection: sqlite3.Connection, package: DeckPackage,
     mod = int(datetime.now().timestamp())
     deck_id = _default_deck_id(connection)
 
+    if len(note_ids) > len(note_type.notes):
+        for note_id in note_ids[len(note_type.notes) :]:
+            connection.execute("DELETE FROM cards WHERE nid=?", (note_id,))
+            connection.execute("DELETE FROM notes WHERE id=?", (note_id,))
+        note_ids = note_ids[: len(note_type.notes)]
+
     for index, note_id in enumerate(note_ids):
-        if index >= len(note_type.notes):
-            break
         values = note_type.notes[index]
         connection.execute(
             "UPDATE notes SET flds=?, mid=?, mod=?, usn=-1 WHERE id=?",
@@ -609,9 +655,13 @@ def _sync_note_rows_normalized(connection: sqlite3.Connection, package: DeckPack
     mod = int(datetime.now().timestamp())
     deck_id = _default_deck_id(connection)
 
+    if len(note_ids) > len(note_type.notes):
+        for note_id in note_ids[len(note_type.notes) :]:
+            connection.execute("DELETE FROM cards WHERE nid=?", (note_id,))
+            connection.execute("DELETE FROM notes WHERE id=?", (note_id,))
+        note_ids = note_ids[: len(note_type.notes)]
+
     for index, note_id in enumerate(note_ids):
-        if index >= len(note_type.notes):
-            break
         values = note_type.notes[index]
         connection.execute(
             "UPDATE notes SET flds=?, mid=?, mod=?, usn=-1 WHERE id=?",
@@ -679,6 +729,7 @@ def _write_legacy_changes(connection: sqlite3.Connection, package: DeckPackage) 
                 original_templates[index]["afmt"] = template.back
         model["css"] = note_type.css
         _sync_note_rows_legacy(connection, package, note_type, int(note_type.id))
+    _purge_removed_note_types_legacy(connection, package, models)
     connection.execute("UPDATE col SET models=?, mod=strftime('%s','now'), usn=-1", (json.dumps(models, ensure_ascii=False),))
 
 
@@ -724,6 +775,7 @@ def _write_normalized_changes(connection: sqlite3.Connection, package: DeckPacka
         if row:
             connection.execute("UPDATE notetypes SET name=?, config=?, mtime_secs=strftime('%s','now'), usn=-1 WHERE id=?", (note_type.name, _replace_protobuf_text(row[0], 3, note_type.css), type_id))
         _sync_note_rows_normalized(connection, package, note_type, type_id)
+    _purge_removed_note_types_normalized(connection, package)
 
 
 def save_apkg(package: DeckPackage, destination: str | Path | None = None, *, backup: bool = True) -> tuple[Path, Path | None]:

@@ -27,6 +27,11 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   status: () => request<Workspace | null>('/api/workspace'),
+  selectNoteType: (noteTypeId: string) =>
+    request<Workspace>('/api/workspace/selected-note-type', {
+      method: 'PUT',
+      body: JSON.stringify({ note_type_id: noteTypeId }),
+    }),
   open: (path: string) => request<Workspace>('/api/packages/open', { method: 'POST', body: JSON.stringify({ path }) }),
   updateTemplate: (noteTypeId: string, index: number, patch: Partial<Template>) =>
     request<Workspace>(`/api/note-types/${noteTypeId}/templates/${index}`, { method: 'PATCH', body: JSON.stringify(patch) }),
@@ -64,6 +69,8 @@ export const api = {
     request<Workspace>(`/api/note-types/${noteTypeId}/notes/${noteIndex}/fields/${fieldOrder}`, { method: 'PATCH', body: JSON.stringify({ value }) }),
   cloneNoteType: (noteTypeId: string, name: string, moveCards = true) =>
     request<Workspace>(`/api/note-types/${noteTypeId}/clone`, { method: 'POST', body: JSON.stringify({ name, move_cards: moveCards }) }),
+  deleteNoteType: (noteTypeId: string) =>
+    request<Workspace>(`/api/note-types/${noteTypeId}`, { method: 'DELETE' }),
   moveNotes: (noteTypeId: string, destinationId: string, mapping?: Record<number, number>) =>
     request<{ workspace: Workspace; moved: number }>(`/api/note-types/${noteTypeId}/move-notes`, {
       method: 'POST',

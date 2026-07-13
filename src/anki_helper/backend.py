@@ -40,6 +40,7 @@ from .anki_package import (
     move_note_field_contents,
     move_notes_between_types,
     read_apkg,
+    remove_note_type,
     render_template,
     reorder_field,
     save_apkg,
@@ -103,6 +104,10 @@ class NoteTypeClone(BaseModel):
 class NoteTypeMoveNotes(BaseModel):
     destination_id: str
     mapping: dict[str, int] | None = None
+
+
+class SelectedNoteType(BaseModel):
+    note_type_id: str
 
 
 class FieldMove(BaseModel):
@@ -186,6 +191,14 @@ def health() -> dict[str, bool]:
 @app.get("/api/workspace")
 def workspace() -> dict | None:
     return _workspace_data()
+
+
+@app.put("/api/workspace/selected-note-type")
+def select_note_type(payload: SelectedNoteType) -> dict:
+    global _selected_note_type_id
+    _get_note_type(payload.note_type_id)
+    _selected_note_type_id = payload.note_type_id
+    return _workspace_data() or {}
 
 
 @app.post("/api/packages/open")
@@ -432,8 +445,23 @@ def clone_note_type(note_type_id: str, payload: NoteTypeClone) -> dict:
     return _workspace_data() or {}
 
 
+@app.delete("/api/note-types/{note_type_id}")
+def delete_note_type(note_type_id: str) -> dict:
+    global _selected_note_type_id
+    if _package is None:
+        raise HTTPException(status_code=404, detail="먼저 APKG 파일을 열어주세요.")
+    try:
+        remove_note_type(_package, note_type_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if _selected_note_type_id == note_type_id:
+        _selected_note_type_id = _package.note_types[0].id if _package.note_types else None
+    return _workspace_data() or {}
+
+
 @app.post("/api/note-types/{note_type_id}/move-notes")
 def move_notes(note_type_id: str, payload: NoteTypeMoveNotes) -> dict:
+    global _selected_note_type_id
     if _package is None:
         raise HTTPException(status_code=404, detail="먼저 APKG 파일을 열어주세요.")
     source = _get_note_type(note_type_id)
@@ -448,6 +476,7 @@ def move_notes(note_type_id: str, payload: NoteTypeMoveNotes) -> dict:
         moved = move_notes_between_types(_package, source, destination, mapping)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _selected_note_type_id = destination.id
     return {"workspace": _workspace_data(), "moved": moved}
 
 

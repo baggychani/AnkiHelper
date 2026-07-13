@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { open, save } from '@tauri-apps/plugin-dialog'
 import { writeFile } from '@tauri-apps/plugin-fs'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 import {
   ArrowLeft, ArrowRight, ArrowRightLeft, BookOpen, Braces, Check, ChevronDown, ChevronRight, ChevronUp, Code2, Copy,
   Database, Download, FileArchive, FolderOpen, Grid2X2, HardDrive,
-  Image, Layers3, ListChecks, LoaderCircle, Music2, Palette, PanelLeft,
+  Image, Layers3, ListChecks, LoaderCircle, LogOut, Music2, Palette, PanelLeft,
   Play, Plus, Save, Sparkles, Table2, Trash2, Type, X,
 } from 'lucide-react'
 import { api, type Field, type MediaItem, type NoteType, type Workspace } from './api'
@@ -33,6 +34,8 @@ function App() {
   const [toast, setToast] = useState('')
   const [toastVisible, setToastVisible] = useState(false)
   const [error, setError] = useState('')
+  const [exitPrompt, setExitPrompt] = useState(false)
+  const allowCloseRef = useRef(false)
 
   const selected = useMemo(() => workspace?.note_types.find((item) => item.id === selectedId) ?? workspace?.note_types[0], [workspace, selectedId])
   const notify = useCallback((message: string) => {
@@ -42,11 +45,61 @@ function App() {
     window.setTimeout(() => setToast(''), 2700)
   }, [])
   const hydrate = useCallback((next: Workspace) => {
-    setWorkspace(next); setSelectedId(next.selected_note_type_id ?? next.note_types[0]?.id ?? '')
-    setTemplateIndex(0); setNoteIndex(0)
+    setWorkspace(next)
+    setSelectedId((current) => {
+      const preferred = next.selected_note_type_id
+      if (preferred && next.note_types.some((item) => item.id === preferred)) return preferred
+      if (current && next.note_types.some((item) => item.id === current)) return current
+      return next.note_types[0]?.id ?? ''
+    })
   }, [])
 
+  useEffect(() => {
+    setTemplateIndex(0)
+    setNoteIndex(0)
+  }, [selectedId])
+
   useEffect(() => { api.status().then((saved) => saved && hydrate(saved)).catch(() => undefined) }, [hydrate])
+
+  useEffect(() => {
+    let disposed = false
+    let unlisten: (() => void) | undefined
+    void getCurrentWindow().onCloseRequested((event) => {
+      if (allowCloseRef.current) return
+      event.preventDefault()
+      setExitPrompt(true)
+    }).then((stop) => {
+      if (disposed) stop()
+      else unlisten = stop
+    }).catch(() => undefined)
+    return () => {
+      disposed = true
+      unlisten?.()
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!exitPrompt) return
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        setExitPrompt(false)
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [exitPrompt])
+
+  const confirmExit = async () => {
+    allowCloseRef.current = true
+    setExitPrompt(false)
+    try {
+      await getCurrentWindow().destroy()
+    } catch {
+      try { await getCurrentWindow().close() }
+      catch { window.close() }
+    }
+  }
   useEffect(() => {
     const fitSidebar = () => { if (window.innerWidth < 900) setSidebarOpen(false) }
     window.addEventListener('resize', fitSidebar)
@@ -63,15 +116,6 @@ function App() {
     const timer = window.setTimeout(() => api.preview(selected.id, templateIndex, side, noteIndex).then(({ html }) => setPreviewHtml(html)).catch(() => undefined), 100)
     return () => window.clearTimeout(timer)
   }, [selected, templateIndex, side, noteIndex, workspace])
-
-  const choosePackage = async () => {
-    const path = await open({ multiple: false, filters: [{ name: 'APKG 또는 편집 프로젝트', extensions: ['apkg', 'zip'] }] })
-    if (typeof path !== 'string') return
-    setBusy(true); setError('')
-    try { hydrate(await api.open(path)); setDirty(false); setPage('overview') }
-    catch (caught) { setError(caught instanceof Error ? caught.message : 'APKG를 열지 못했습니다.') }
-    finally { setBusy(false) }
-  }
 
   const persist = async () => {
     if (!workspace) return
@@ -118,8 +162,37 @@ function App() {
   }
 
   const mutate = async (operation: () => Promise<Workspace>, success?: string) => {
-    try { hydrate(await operation()); setDirty(true); if (success) notify(success) }
-    catch (caught) { setError(caught instanceof Error ? caught.message : '변경사항을 처리하지 못했습니다.') }
+    try {
+      hydrate(await operation())
+      setDirty(true)
+      if (success) notify(success)
+      return true
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : '변경사항을 처리하지 못했습니다.')
+      return false
+    }
+  }
+
+  const selectNoteType = async (id: string) => {
+    if (id === selectedId) return
+    const previous = selectedId
+    setSelectedId(id)
+    try {
+      hydrate(await api.selectNoteType(id))
+    } catch (caught) {
+      setSelectedId(previous)
+      setError(caught instanceof Error ? caught.message : '노트 유형을 선택하지 못했습니다.')
+    }
+  }
+
+  const choosePackage = async () => {
+    if (dirty && !window.confirm('저장하지 않은 변경이 있습니다. 저장하지 않고 다른 파일을 열까요?')) return
+    const path = await open({ multiple: false, filters: [{ name: 'APKG 또는 편집 프로젝트', extensions: ['apkg', 'zip'] }] })
+    if (typeof path !== 'string') return
+    setBusy(true); setError('')
+    try { hydrate(await api.open(path)); setDirty(false); setPage('overview') }
+    catch (caught) { setError(caught instanceof Error ? caught.message : 'APKG를 열지 못했습니다.') }
+    finally { setBusy(false) }
   }
 
   const updateCell = async (row: number, fieldOrder: number, value: string) => {
@@ -138,23 +211,62 @@ function App() {
     <div className="flex h-full min-w-0">
       <aside className={`${sidebarOpen ? 'w-[224px] xl:w-[272px]' : 'w-[64px] lg:w-[72px]'} flex h-full shrink-0 flex-col overflow-hidden rounded-[22px] bg-[#0b1426] text-white transition-[width] duration-300 lg:rounded-[26px]`}>
         <div className="flex h-[68px] shrink-0 items-center gap-3 px-3 lg:h-[76px] lg:px-4"><button onClick={() => { if (!sidebarOpen) setSidebarOpen(true) }} title={sidebarOpen ? 'Anki Helper' : '사이드바 열기'} className="group relative grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-gradient-to-br from-indigo-400 to-cyan-300 text-slate-950"><Layers3 size={21} />{!sidebarOpen && <span className="absolute inset-0 grid place-items-center rounded-xl bg-slate-950/70 text-white opacity-0 transition group-hover:opacity-100"><ChevronRight size={18} /></span>}</button>{sidebarOpen && <div className="min-w-0"><p className="truncate text-sm font-extrabold tracking-[.13em]">ANKI HELPER</p><p className="mt-0.5 text-[10px] text-slate-500">Anki 덱 도우미</p></div>}{sidebarOpen && <button title="사이드바 접기" className="ml-auto shrink-0 text-slate-500 hover:text-white" onClick={() => setSidebarOpen(false)}><PanelLeft size={17} /></button>}</div>
-        <nav className="min-h-0 flex-1 space-y-1 overflow-x-hidden overflow-y-auto px-2 pt-2 lg:px-3 lg:pt-4">{navItems.map(([id, label, Icon]) => <button key={id} disabled={!workspace && id !== 'overview'} onClick={() => setPage(id)} title={label} className={`flex h-11 w-full items-center rounded-xl px-3 text-left text-[13px] font-medium transition ${page === id ? 'bg-white/[.11] text-white shadow-[inset_3px_0_0_#818cf8]' : 'text-slate-500 hover:bg-white/[.055] hover:text-slate-200'} disabled:opacity-30`}><Icon size={18} /><span className={`${sidebarOpen ? 'ml-3 opacity-100' : 'w-0 opacity-0'} whitespace-nowrap transition-all`}>{label}</span></button>)}</nav>
-        <div className="shrink-0 px-2 pb-3 lg:px-3 lg:pb-4"><p className={`${sidebarOpen ? 'block' : 'hidden'} mb-2 px-3 text-[10px] font-semibold tracking-[.14em] text-slate-600`}>가져오기·내보내기</p>
-          <SideAction label="편집 프로젝트 내보내기" icon={FileArchive} compact={!sidebarOpen} disabled={!selected} onClick={() => exportFile('project')} />
-          <SideAction label="미디어 파일 추출" icon={Music2} compact={!sidebarOpen} disabled={!selected} onClick={() => exportFile('media')} />
-          <SideAction label="입력 TSV" icon={Download} compact={!sidebarOpen} disabled={!selected} onClick={() => exportFile('tsv')} />
-          <SideAction label="디자인 JSON" icon={Code2} compact={!sidebarOpen} disabled={!selected} onClick={() => exportFile('design')} />
-          <SideAction label="다른 이름으로 APKG 저장" icon={HardDrive} compact={!sidebarOpen} disabled={!selected} onClick={() => exportFile('bundle')} />
-          {sidebarOpen && <div className="sidebar-version mx-2 mt-4 border-t border-white/[.07] pt-3 text-[10px] leading-5 text-slate-600"><p>v1.0.1</p><p>© 2026 Bae Gichan</p></div>}
+        <div className="flex min-h-0 flex-1 flex-col overflow-y-auto overflow-x-hidden">
+          <nav className="shrink-0 space-y-1 px-2 pt-2 lg:px-3 lg:pt-4">{navItems.map(([id, label, Icon]) => <button key={id} disabled={!workspace && id !== 'overview'} onClick={() => setPage(id)} title={label} className={`flex h-11 w-full items-center rounded-xl px-3 text-left text-[13px] font-medium transition ${page === id ? 'bg-white/[.11] text-white shadow-[inset_3px_0_0_#818cf8]' : 'text-slate-500 hover:bg-white/[.055] hover:text-slate-200'} disabled:opacity-30`}><Icon size={18} /><span className={`${sidebarOpen ? 'ml-3 opacity-100' : 'w-0 opacity-0'} whitespace-nowrap transition-all`}>{label}</span></button>)}</nav>
+          <div className="mt-auto shrink-0 px-2 pb-3 pt-4 lg:px-3 lg:pb-4"><p className={`${sidebarOpen ? 'block' : 'hidden'} mb-2 px-3 text-[10px] font-semibold tracking-[.14em] text-slate-600`}>가져오기·내보내기</p>
+            <SideAction label="편집 프로젝트 내보내기" icon={FileArchive} compact={!sidebarOpen} disabled={!selected} onClick={() => exportFile('project')} />
+            <SideAction label="미디어 파일 추출" icon={Music2} compact={!sidebarOpen} disabled={!selected} onClick={() => exportFile('media')} />
+            <SideAction label="입력 TSV" icon={Download} compact={!sidebarOpen} disabled={!selected} onClick={() => exportFile('tsv')} />
+            <SideAction label="디자인 JSON" icon={Code2} compact={!sidebarOpen} disabled={!selected} onClick={() => exportFile('design')} />
+            <SideAction label="다른 이름으로 APKG 저장" icon={HardDrive} compact={!sidebarOpen} disabled={!selected} onClick={() => exportFile('bundle')} />
+            {sidebarOpen && <div className="sidebar-version mx-2 mt-4 border-t border-white/[.07] pt-3 text-[10px] leading-5 text-slate-600"><p>v1.1.0</p><p>© 2026 Bae Gichan</p></div>}
+          </div>
         </div>
       </aside>
       <section className="ml-2 flex h-full min-w-0 flex-1 flex-col overflow-hidden lg:ml-4">
-        <header className="flex h-[64px] shrink-0 items-center justify-between gap-3 px-2 lg:h-[72px] lg:px-3"><div className="min-w-0">{workspace ? <p className="text-[10px] font-bold tracking-[.06em] text-indigo-500">현재 노트 유형</p> : null}<h1 className={`truncate text-lg font-semibold tracking-tight lg:text-xl ${workspace ? 'mt-1' : ''}`}>{selected?.name ?? '복잡한 Anki 파일, 쉽게.'}</h1></div><div className="flex shrink-0 items-center gap-2">{workspace && <button onClick={persist} disabled={busy || !dirty} className={`inline-flex h-9 items-center gap-2 rounded-xl px-3 text-xs font-semibold transition lg:h-10 lg:px-4 ${dirty ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-500/20' : 'border border-slate-200 bg-white text-slate-400'}`}>{busy ? <LoaderCircle className="animate-spin" size={16} /> : <Save size={16} />}{dirty ? '저장' : '저장됨'}<span className="hidden text-[10px] opacity-65 lg:inline">Ctrl+S</span></button>}<button onClick={choosePackage} disabled={busy} className="inline-flex h-9 items-center gap-2 rounded-xl bg-[#11182a] px-3 text-xs font-semibold text-white lg:h-10 lg:px-4"><FolderOpen size={16} /><span className="hidden sm:inline">파일 열기</span></button></div></header>
-        <div className={`min-h-0 flex-1 px-3 pb-4 ${!workspace || page === 'design' || page === 'media' ? 'overflow-hidden' : 'overflow-y-auto'}`}>{!workspace ? <Welcome onOpen={choosePackage} busy={busy} /> : page === 'overview' ? <Overview workspace={workspace} selected={selected} onPage={setPage} onSelect={setSelectedId} onMoveNotes={async (fromId, toId, mapping) => { try { const result = await api.moveNotes(fromId, toId, mapping); hydrate(result.workspace); setDirty(true); notify(`${result.moved.toLocaleString()}개 카드를 옮겼습니다.`); } catch (caught) { setError(caught instanceof Error ? caught.message : '카드를 옮기지 못했습니다.'); throw caught } }} /> : page === 'data' ? <DataPage noteType={selected} onUpdate={updateCell} /> : page === 'fields' ? <FieldsPage noteType={selected} onRename={(order, name) => mutate(() => api.updateField(selected!.id, order, name))} onAdd={(name) => mutate(() => api.addField(selected!.id, name))} onDelete={(order) => mutate(() => api.deleteField(selected!.id, order))} onReorder={(order, newOrder) => mutate(() => api.reorderField(selected!.id, order, newOrder))} onMove={async (order, destination, mode) => { const result = await api.moveFieldContents(selected!.id, order, destination, mode); hydrate(result.workspace); setDirty(true); notify(`${result.changed.toLocaleString()}개 노트에서 내용을 이동했습니다.`); return result.changed }} onClone={(name) => mutate(async () => { const next = await api.cloneNoteType(selected!.id, name, true); setPage('overview'); return next }, '카드를 새 노트 유형으로 옮겼습니다. 저장하면 APKG에 반영됩니다.')} /> : page === 'media' ? <MediaPage onExport={() => exportFile('media')} /> : page === 'design' ? <DesignPage noteType={selected} index={templateIndex} setIndex={setTemplateIndex} onSave={(mode, value) => mutate(() => mode === 'css' ? api.updateCss(selected!.id, value) : api.updateTemplate(selected!.id, templateIndex, { [mode]: value }), '카드 디자인을 적용했습니다.')} notify={notify} /> : <PreviewPage noteType={selected} side={side} setSide={setSide} noteIndex={noteIndex} setNoteIndex={setNoteIndex} previewHtml={previewHtml} />}</div>
+        <header className="flex h-[64px] shrink-0 items-center justify-between gap-3 px-2 lg:h-[72px] lg:px-3">
+          <div className="min-w-0 flex-1">
+            {workspace ? (
+              <div className="flex min-w-0 items-center gap-3 lg:gap-4">
+                <div className="min-w-0 max-w-[55%]">
+                  <p className="text-[10px] font-bold tracking-[.06em] text-indigo-500">열린 파일</p>
+                  <h1 className="mt-1 truncate text-lg font-semibold tracking-tight lg:text-xl" title={workspace.source_name}>{workspace.source_name}</h1>
+                </div>
+                <span className="hidden h-9 w-px shrink-0 bg-slate-200 sm:block" aria-hidden />
+                <div className="min-w-0 flex-1">
+                  <p className="text-[10px] font-bold tracking-[.06em] text-slate-400">노트 유형</p>
+                  <p className="mt-1 truncate text-lg font-semibold tracking-tight text-slate-700 lg:text-xl" title={selected?.name}>{selected?.name ?? '—'}</p>
+                </div>
+              </div>
+            ) : (
+              <h1 className="truncate text-lg font-semibold tracking-tight lg:text-xl">안녕하세요, 반갑습니다!</h1>
+            )}
+          </div>
+          <div className="flex shrink-0 items-center gap-2">{workspace && <button onClick={persist} disabled={busy || !dirty} className={`inline-flex h-9 items-center gap-2 rounded-xl px-3 text-xs font-semibold transition lg:h-10 lg:px-4 ${dirty ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-500/20' : 'border border-slate-200 bg-white text-slate-400'}`}>{busy ? <LoaderCircle className="animate-spin" size={16} /> : <Save size={16} />}{dirty ? '저장' : '저장됨'}<span className="hidden text-[10px] opacity-65 lg:inline">Ctrl+S</span></button>}<button onClick={choosePackage} disabled={busy} className="inline-flex h-9 items-center gap-2 rounded-xl bg-[#11182a] px-3 text-xs font-semibold text-white lg:h-10 lg:px-4"><FolderOpen size={16} /><span className="hidden sm:inline">파일 열기</span></button></div>
+        </header>
+        <div className={`min-h-0 flex-1 px-3 pb-4 ${!workspace || page === 'design' || page === 'media' ? 'overflow-hidden' : 'overflow-y-auto'}`}>{!workspace ? <Welcome onOpen={choosePackage} busy={busy} /> : page === 'overview' ? <Overview workspace={workspace} selected={selected} onPage={setPage} onSelect={(id) => { void selectNoteType(id) }} onDeleteNoteType={(id) => mutate(() => api.deleteNoteType(id), '빈 노트 유형을 제거했습니다. 저장하면 APKG에 반영됩니다.')} onMoveNotes={async (fromId, toId, mapping) => { try { const result = await api.moveNotes(fromId, toId, mapping); hydrate(result.workspace); setDirty(true); notify(`${result.moved.toLocaleString()}개 카드를 옮겼습니다.`); } catch (caught) { setError(caught instanceof Error ? caught.message : '카드를 옮기지 못했습니다.'); throw caught } }} /> : page === 'data' ? <DataPage noteType={selected} onUpdate={updateCell} /> : page === 'fields' ? <FieldsPage noteType={selected} onRename={async (order, name) => { await mutate(() => api.updateField(selected!.id, order, name)) }} onAdd={async (name) => { await mutate(() => api.addField(selected!.id, name)) }} onDelete={async (order) => { await mutate(() => api.deleteField(selected!.id, order)) }} onReorder={async (order, newOrder) => { await mutate(() => api.reorderField(selected!.id, order, newOrder)) }} onMove={async (order, destination, mode) => { const result = await api.moveFieldContents(selected!.id, order, destination, mode); hydrate(result.workspace); setDirty(true); notify(`${result.changed.toLocaleString()}개 노트에서 내용을 이동했습니다.`); return result.changed }} onClone={async (name) => { await mutate(async () => { const next = await api.cloneNoteType(selected!.id, name, true); setPage('overview'); return next }, '카드를 새 노트 유형으로 옮겼습니다. 저장하면 APKG에 반영됩니다.') }} /> : page === 'media' ? <MediaPage onExport={() => exportFile('media')} /> : page === 'design' ? <DesignPage noteType={selected} index={templateIndex} setIndex={setTemplateIndex} onSave={async (mode, value) => { await mutate(() => mode === 'css' ? api.updateCss(selected!.id, value) : api.updateTemplate(selected!.id, templateIndex, { [mode]: value }), '카드 디자인을 적용했습니다.') }} notify={notify} /> : <PreviewPage noteType={selected} side={side} setSide={setSide} noteIndex={noteIndex} setNoteIndex={setNoteIndex} previewHtml={previewHtml} />}</div>
       </section>
     </div>
     {toast && <div className={`fixed bottom-7 left-1/2 z-[70] -translate-x-1/2 rounded-xl bg-[#0b1426] px-5 py-3 text-sm font-semibold text-white shadow-2xl ring-1 ring-white/10 transition-opacity duration-300 ${toastVisible ? 'opacity-100' : 'opacity-0'}`}><span className="mr-2 text-emerald-400">✓</span>{toast}</div>}
     {error && <Modal title="작업을 완료하지 못했습니다" description={error} tone="danger" confirmLabel="확인" onConfirm={() => setError('')} />}
+    {exitPrompt && (
+      <div className="fixed inset-0 z-[90] grid place-items-center bg-slate-950/45 p-4 backdrop-blur-sm" onClick={() => setExitPrompt(false)}>
+        <div role="dialog" aria-modal="true" aria-labelledby="exit-title" className="w-full max-w-md rounded-[22px] border border-white/70 bg-white p-6 shadow-2xl" onClick={(event) => event.stopPropagation()}>
+          <div className="mb-4 grid h-11 w-11 place-items-center rounded-xl bg-[#151d31] text-white"><LogOut size={20} /></div>
+          <h3 id="exit-title" className="text-lg font-semibold">Anki Helper를 종료할까요?</h3>
+          <p className="mt-2 text-sm leading-6 text-slate-500">
+            {dirty
+              ? '저장하지 않은 변경이 있습니다. 종료하면 이 작업 내용은 사라집니다.'
+              : '창을 닫으면 프로그램이 종료됩니다.'}
+          </p>
+          <p className="mt-3 text-xs text-slate-400">Esc로 취소할 수 있습니다.</p>
+          <div className="mt-6 flex justify-end gap-2">
+            <button onClick={() => setExitPrompt(false)} className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-semibold text-slate-600">취소</button>
+            <button onClick={() => void confirmExit()} className="rounded-xl bg-[#151d31] px-4 py-2.5 text-sm font-semibold text-white">종료</button>
+          </div>
+        </div>
+      </div>
+    )}
   </main>
 }
 
@@ -175,11 +287,12 @@ function defaultFieldMapping(source: NoteType, destination: NoteType): Record<nu
   return mapping
 }
 
-function Overview({ workspace, selected, onPage, onSelect, onMoveNotes }: {
+function Overview({ workspace, selected, onPage, onSelect, onDeleteNoteType, onMoveNotes }: {
   workspace: Workspace
   selected?: NoteType
   onPage: (page: Page) => void
   onSelect: (id: string) => void
+  onDeleteNoteType: (id: string) => Promise<boolean>
   onMoveNotes: (fromId: string, toId: string, mapping: Record<number, number>) => Promise<void>
 }) {
   const [movingFrom, setMovingFrom] = useState<NoteType | null>(null)
@@ -187,6 +300,7 @@ function Overview({ workspace, selected, onPage, onSelect, onMoveNotes }: {
   const [mapping, setMapping] = useState<Record<number, number>>({})
   const [activeSource, setActiveSource] = useState<number | null>(null)
   const [busyMove, setBusyMove] = useState(false)
+  const [deletingType, setDeletingType] = useState<NoteType | null>(null)
   const mapRef = useRef<HTMLDivElement | null>(null)
   const [lineBox, setLineBox] = useState({ width: 0, height: 0 })
   const otherTypes = movingFrom ? workspace.note_types.filter((item) => item.id !== movingFrom.id) : []
@@ -245,14 +359,15 @@ function Overview({ workspace, selected, onPage, onSelect, onMoveNotes }: {
     <section className="grid grid-cols-1 gap-3 sm:grid-cols-3 lg:gap-4"><Stat label="카드" value={selected?.notes.length ?? 0} icon={BookOpen} /><FieldSummary fields={selected?.fields ?? []} /><Stat label="미디어" value={workspace.media_count} icon={Music2} /></section>
     <section className="grid gap-4 lg:grid-cols-[1.2fr_.8fr] lg:gap-5">
       <Card title="노트 유형">
-        <p className="-mt-2 mb-4 text-sm text-slate-400">카드를 다른 노트 유형으로 옮기려면 이동 버튼을 누르세요.</p>
+        <p className="-mt-2 mb-4 text-sm text-slate-400">카드를 다른 노트 유형으로 옮기려면 이동 버튼을 누르세요. 카드가 0개인 유형은 제거할 수 있습니다.</p>
         <div className="space-y-2">{workspace.note_types.map((item, index) => (
           <div key={item.id} className={`flex items-center gap-2 rounded-xl px-3 py-2 ${item.id === selected?.id ? 'bg-indigo-50 ring-1 ring-indigo-200' : 'bg-slate-50'}`}>
-            <button onClick={() => { onSelect(item.id); onPage('data') }} className="flex min-w-0 flex-1 items-center gap-3 rounded-lg px-1 py-1 text-left hover:bg-white/70">
+            <button onClick={() => onSelect(item.id)} className="flex min-w-0 flex-1 items-center gap-3 rounded-lg px-1 py-1 text-left hover:bg-white/70">
               <span className="grid h-8 w-8 place-items-center rounded-lg bg-indigo-600 text-xs font-bold text-white">{index + 1}</span>
               <span className="min-w-0"><b className="block truncate text-sm">{item.name}</b><small className="text-slate-400">{item.notes.length}개 카드 · {item.fields.length}개 필드</small></span>
             </button>
             <button title="카드 이동" disabled={item.notes.length === 0 || workspace.note_types.length < 2} onClick={() => { setMovingFrom(item); setMovingTo(null) }} className="rounded-lg p-2 text-indigo-600 hover:bg-indigo-100 disabled:opacity-25"><ArrowRightLeft size={16} /></button>
+            <button title="노트 유형 제거" disabled={item.notes.length > 0 || workspace.note_types.length <= 1} onClick={() => setDeletingType(item)} className="rounded-lg p-2 text-rose-500 hover:bg-rose-50 disabled:opacity-25"><Trash2 size={16} /></button>
           </div>
         ))}</div>
       </Card>
@@ -336,6 +451,19 @@ function Overview({ workspace, selected, onPage, onSelect, onMoveNotes }: {
         </div>
       </div>
     )}
+
+    {deletingType && (
+      <Modal
+        title={`‘${deletingType.name}’ 노트 유형을 제거할까요?`}
+        description="카드가 없는 빈 유형만 제거할 수 있습니다. 저장하면 APKG에서도 사라집니다."
+        tone="danger"
+        confirmLabel="제거"
+        onCancel={() => setDeletingType(null)}
+        onConfirm={async () => {
+          if (await onDeleteNoteType(deletingType.id)) setDeletingType(null)
+        }}
+      />
+    )}
   </div>
 }
 function Card({ title, children }: { title: string; children: React.ReactNode }) { return <section className="rounded-[18px] border border-slate-200/70 bg-white p-4 shadow-card lg:rounded-[22px] lg:p-5"><h3 className="mb-4 text-lg font-semibold">{title}</h3>{children}</section> }
@@ -343,22 +471,19 @@ function Stat({ label, value, icon: Icon }: { label: string; value: number; icon
 function FieldSummary({ fields }: { fields: Field[] }) { const shown = fields.slice(0, 4); return <div className="rounded-[20px] border border-slate-200/70 bg-white p-5 shadow-card"><p className="text-xs font-semibold text-slate-400">필드 목록</p><div className="mt-3 flex flex-wrap gap-1.5">{shown.map((field) => <span key={field.order} title={field.name} className="max-w-[120px] truncate rounded-lg bg-slate-100 px-2.5 py-1.5 text-xs text-slate-600">{field.name}</span>)}{fields.length > shown.length && <span className="rounded-lg bg-indigo-50 px-2.5 py-1.5 text-xs text-indigo-600">외 {fields.length - shown.length}개</span>}</div><button onClick={() => window.dispatchEvent(new CustomEvent('ankihelper:navigate', { detail: 'fields' }))} className="mt-3 inline-flex items-center gap-1 text-xs font-semibold text-indigo-600">필드 관리에서 전체 보기<ArrowRight size={13} /></button></div> }
 function Quick({ label, icon: Icon, onClick }: { label: string; icon: typeof Table2; onClick: () => void }) { const descriptions: Record<string, string> = { '카드 데이터': '불러온 필드와 노트를 확인합니다', '필드 관리': '필드 이름과 구성을 편집합니다', '미디어 관리': '음성과 이미지를 확인하고 저장합니다', '카드 디자인': 'HTML과 CSS 템플릿을 편집합니다' }; return <button onClick={onClick} className="flex w-full items-center gap-3 rounded-xl bg-slate-50 p-3 text-left hover:bg-indigo-50"><span className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-white text-slate-600 shadow-sm"><Icon size={17} /></span><span><b className="block text-sm text-slate-700">{label}</b><small className="mt-0.5 block text-xs text-slate-400">{descriptions[label]}</small></span><ArrowRight className="ml-auto text-slate-300" size={15} /></button> }
 
-function mediaFilename(value: string) {
-  const sound = value.match(/\[sound:([^\]]+)\]/i)
-  const image = value.match(/<img[^>]+src=["']([^"']+)["']/i)
-  return sound?.[1] ?? image?.[1]?.split(/[\\/]/).pop()
-}
-
 function splitCellContent(value: string) {
-  const sound = value.match(/\[sound:([^\]]+)\]/i)
-  const filename = mediaFilename(value)
+  const mediaMatches = [...value.matchAll(/\[sound:([^\]]+)\]|<img\b[^>]*\bsrc=["']([^"']+)["'][^>]*>/gi)]
+  const media = mediaMatches.map((match) => {
+    const filename = match[1] ?? match[2]?.split(/[\\/]/).pop() ?? ''
+    return { filename, isSound: Boolean(match[1]) }
+  }).filter((item) => item.filename)
   const text = value
     .replace(/\[sound:[^\]]+\]/gi, ' ')
     .replace(/<img\b[^>]*>/gi, ' ')
     .replace(/[ \t]+\n/g, '\n')
     .replace(/[ \t]{2,}/g, ' ')
     .trim()
-  return { text, filename, isSound: Boolean(sound) }
+  return { text, media, filename: media[0]?.filename, isSound: media[0]?.isSound ?? false }
 }
 
 function DataPage({ noteType, onUpdate }: { noteType?: NoteType; onUpdate: (row: number, fieldOrder: number, value: string) => Promise<void> }) {
@@ -420,7 +545,7 @@ function DataValue({ row, fieldOrder, value = '', onUpdate }: { row: number; fie
   const [saving, setSaving] = useState(false)
   const skipBlur = useRef(false)
   useEffect(() => { if (!editing) setDraft(value) }, [value, editing])
-  const { text, filename, isSound } = splitCellContent(value)
+  const { text, media } = splitCellContent(value)
 
   const commit = async () => {
     if (saving) return
@@ -433,16 +558,16 @@ function DataValue({ row, fieldOrder, value = '', onUpdate }: { row: number; fie
 
   if (editing) return <textarea autoFocus rows={Math.min(4, Math.max(1, draft.split('\n').length))} value={draft} onChange={(event) => setDraft(event.target.value)} onBlur={() => { if (skipBlur.current) { skipBlur.current = false; return } void commit() }} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); event.currentTarget.blur() } else if (event.key === 'Escape') { event.preventDefault(); skipBlur.current = true; setDraft(value); setEditing(false) } }} disabled={saving} className="min-h-9 w-full resize-none rounded-lg border border-indigo-300 bg-white px-2.5 py-2 text-sm leading-5 text-slate-700 outline-none ring-2 ring-indigo-100" />
 
-  // Media only: keep the compact media chip.
-  if (filename && !text) return <MediaChip filename={filename} isSound={isSound} />
+  if (media.length && !text) {
+    return <div className="flex min-h-9 w-full flex-wrap gap-1.5">{media.map((item) => <MediaChip key={`${item.filename}-${item.isSound}`} filename={item.filename} isSound={item.isSound} />)}</div>
+  }
 
-  // Text + media: show both so AwesomeTTS mixups are visible.
-  if (filename && text) {
+  if (media.length && text) {
     return <div className="flex min-h-9 w-full flex-col gap-1.5 rounded-lg px-1.5 py-1.5 hover:bg-indigo-50">
       <button onDoubleClick={() => setEditing(true)} title="더블클릭하여 수정" className="w-full text-left leading-5">
         <span className="line-clamp-2 whitespace-pre-wrap text-slate-700">{text}</span>
       </button>
-      <MediaChip filename={filename} isSound={isSound} />
+      <div className="flex flex-wrap gap-1.5">{media.map((item) => <MediaChip key={`${item.filename}-${item.isSound}`} filename={item.filename} isSound={item.isSound} />)}</div>
     </div>
   }
 
@@ -675,6 +800,19 @@ function DesignPage({ noteType, index, setIndex, onSave, notify }: { noteType?: 
 
 function PreviewPage({ noteType, side, setSide, noteIndex, setNoteIndex, previewHtml }: { noteType?: NoteType; side: 'front' | 'back'; setSide: (side: 'front' | 'back') => void; noteIndex: number; setNoteIndex: (index: number) => void; previewHtml: string }) { if (!noteType) return null; const total = Math.max(noteType.notes.length, 1); const doc = `<!doctype html><html><head><style>html,body{height:100%;margin:0}body{background:#fff}#anki-card{min-height:100%;box-sizing:border-box}</style></head><body class="card"><div id="anki-card" class="card">${previewHtml}</div><script>document.querySelectorAll('.anki-audio').forEach(b=>{let a;b.onclick=()=>{a??=new Audio(b.dataset.audio);if(a.paused){a.play();b.textContent='■';b.classList.add('playing')}else{a.pause();b.textContent='▶';b.classList.remove('playing')}a.onended=()=>{b.textContent='▶';b.classList.remove('playing')}}})</script></body></html>`; return <div className="mx-auto grid max-w-[1420px] gap-3 lg:grid-cols-[minmax(0,1fr)_230px] lg:gap-5 xl:grid-cols-[minmax(0,1fr)_250px]"><section className="grid min-h-[480px] place-items-center rounded-[20px] bg-[#172033] p-3 lg:min-h-[620px] lg:rounded-[26px] lg:p-5"><div className="flex h-[min(72vh,710px)] w-full max-w-[580px] flex-col overflow-hidden rounded-[24px] border-[6px] border-[#0a0f1d] bg-white shadow-2xl lg:rounded-[32px] lg:border-[7px]"><div className="flex h-11 shrink-0 items-center justify-between border-b px-5 text-[11px] text-slate-400"><span className="h-2 w-2 rounded-full bg-emerald-400" /><b>ANKI 미리보기</b><span>{noteIndex + 1} / {total}</span></div><iframe title="카드 미리보기" sandbox="allow-scripts allow-same-origin" srcDoc={doc} className="h-full w-full border-0" /></div></section><aside className="flex min-h-[170px] flex-col rounded-[18px] border border-slate-200/70 bg-white p-4 shadow-card lg:rounded-[22px] lg:p-5"><h2 className="text-lg font-semibold">실시간 미리보기</h2><div className="mt-4 grid grid-cols-2 rounded-xl bg-slate-100 p-1 lg:mt-6"><button onClick={() => setSide('front')} className={`rounded-lg py-2 text-xs font-semibold ${side === 'front' ? 'bg-white shadow-sm' : 'text-slate-400'}`}>앞면</button><button onClick={() => setSide('back')} className={`rounded-lg py-2 text-xs font-semibold ${side === 'back' ? 'bg-white shadow-sm' : 'text-slate-400'}`}>뒷면</button></div><div className="mt-auto grid grid-cols-2 gap-2"><button onClick={() => setNoteIndex((noteIndex - 1 + total) % total)} className="inline-flex items-center justify-center gap-2 rounded-xl border py-2.5 text-xs font-semibold"><ArrowLeft size={15} />이전</button><button onClick={() => setNoteIndex((noteIndex + 1) % total)} className="inline-flex items-center justify-center gap-2 rounded-xl bg-[#151d31] py-2.5 text-xs font-semibold text-white">다음<ArrowRight size={15} /></button></div></aside></div> }
 
-function Modal({ title, description, tone = 'normal', confirmLabel, onCancel, onConfirm }: { title: string; description: string; tone?: 'normal' | 'danger'; confirmLabel: string; onCancel?: () => void; onConfirm: () => void | Promise<void> }) { return <div className="fixed inset-0 z-[80] grid place-items-center bg-slate-950/40 p-4 backdrop-blur-sm"><div className="w-full max-w-md rounded-[22px] border border-white/70 bg-white p-6 shadow-2xl"><div className={`mb-4 grid h-11 w-11 place-items-center rounded-xl ${tone === 'danger' ? 'bg-rose-100 text-rose-600' : 'bg-indigo-100 text-indigo-600'}`}>{tone === 'danger' ? <X size={20} /> : <Check size={20} />}</div><h3 className="text-lg font-semibold">{title}</h3><p className="mt-2 text-sm leading-6 text-slate-500">{description}</p><div className="mt-6 flex justify-end gap-2">{onCancel && <button onClick={onCancel} className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-semibold text-slate-600">취소</button>}<button onClick={onConfirm} className={`rounded-xl px-4 py-2.5 text-sm font-semibold text-white ${tone === 'danger' ? 'bg-rose-600' : 'bg-indigo-600'}`}>{confirmLabel}</button></div></div></div> }
+function Modal({ title, description, tone = 'normal', confirmLabel, onCancel, onConfirm }: { title: string; description: string; tone?: 'normal' | 'danger'; confirmLabel: string; onCancel?: () => void; onConfirm: () => void | Promise<void> }) {
+  useEffect(() => {
+    if (!onCancel) return
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        onCancel()
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onCancel])
+  return <div className="fixed inset-0 z-[80] grid place-items-center bg-slate-950/40 p-4 backdrop-blur-sm"><div className="w-full max-w-md rounded-[22px] border border-white/70 bg-white p-6 shadow-2xl"><div className={`mb-4 grid h-11 w-11 place-items-center rounded-xl ${tone === 'danger' ? 'bg-rose-100 text-rose-600' : 'bg-indigo-100 text-indigo-600'}`}>{tone === 'danger' ? <X size={20} /> : <Check size={20} />}</div><h3 className="text-lg font-semibold">{title}</h3><p className="mt-2 text-sm leading-6 text-slate-500">{description}</p><div className="mt-6 flex justify-end gap-2">{onCancel && <button onClick={onCancel} className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-semibold text-slate-600">취소</button>}<button onClick={onConfirm} className={`rounded-xl px-4 py-2.5 text-sm font-semibold text-white ${tone === 'danger' ? 'bg-rose-600' : 'bg-indigo-600'}`}>{confirmLabel}</button></div></div></div>
+}
 
 export default App
