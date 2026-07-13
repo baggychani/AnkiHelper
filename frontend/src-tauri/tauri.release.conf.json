@@ -3,6 +3,12 @@
   "bundle": {
     "active": true,
     "targets": ["nsis"],
-    "externalBin": ["binaries/anki-helper-backend"]
+    "externalBin": ["binaries/anki-helper-backend"],
+    "windows": {
+      "nsis": {
+        "template": "windows/installer.nsi",
+        "languages": ["Korean", "English"]
+      }
+    }
   }
 }

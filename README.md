@@ -2,7 +2,7 @@
 
 Anki Helper는 Anki의 `.apkg` 파일을 열어 카드 데이터, 필드, 미디어와 카드 디자인을 한곳에서 편집하는 Windows 데스크톱 앱입니다. 화면은 React와 Tailwind CSS, 데스크톱 실행 환경은 Tauri, APKG 처리는 Python FastAPI가 담당합니다.
 
-현재 버전: **1.0.1**
+현재 버전: **1.0.2**
 
 ## 지원 파일
 
