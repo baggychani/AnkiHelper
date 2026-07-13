@@ -634,12 +634,18 @@ Section Install
  !insertmacro KillAnkiHelperLeftovers
  !insertmacro CheckIfAppIsRunning "${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
 
- ; Copy main executable
- File "${MAINBINARYSRCPATH}"
+ ; Always install under MAINBINARYNAME, regardless of the source filename.
+ File "/oname=${MAINBINARYNAME}.exe" "${MAINBINARYSRCPATH}"
 
- ; Older builds may have written product-name binaries; remove them on upgrade.
- Delete "$INSTDIR\Anki-Helper.exe"
- Delete "$INSTDIR\Anki Helper.exe"
+ ; Remove legacy product-name binaries only when they are not the current main exe.
+ ${If} ${FileExists} "$INSTDIR\${MAINBINARYNAME}.exe"
+   ${If} "${MAINBINARYNAME}.exe" != "Anki-Helper.exe"
+     Delete "$INSTDIR\Anki-Helper.exe"
+   ${EndIf}
+   ${If} "${MAINBINARYNAME}.exe" != "Anki Helper.exe"
+     Delete "$INSTDIR\Anki Helper.exe"
+   ${EndIf}
+ ${EndIf}
 
  ; Copy resources
  {{#each resources_dirs}}
@@ -906,35 +912,10 @@ Function un.SkipIfPassive
 FunctionEnd
 
 Function CreateOrUpdateStartMenuShortcut
- ; We used to use product name as MAINBINARYNAME
- ; migrate old shortcuts to target the new MAINBINARYNAME
- StrCpy $R0 0
-
- !insertmacro IsShortcutTarget "$SMPROGRAMS\$AppStartMenuFolder\${PRODUCTNAME}.lnk" "$INSTDIR\$OldMainBinaryName"
- Pop $0
- ${If} $0 = 1
- !insertmacro SetShortcutTarget "$SMPROGRAMS\$AppStartMenuFolder\${PRODUCTNAME}.lnk" "$INSTDIR\${MAINBINARYNAME}.exe"
- StrCpy $R0 1
- ${EndIf}
-
- !insertmacro IsShortcutTarget "$SMPROGRAMS\${PRODUCTNAME}.lnk" "$INSTDIR\$OldMainBinaryName"
- Pop $0
- ${If} $0 = 1
- !insertmacro SetShortcutTarget "$SMPROGRAMS\${PRODUCTNAME}.lnk" "$INSTDIR\${MAINBINARYNAME}.exe"
- StrCpy $R0 1
- ${EndIf}
-
- ${If} $R0 = 1
+ ; Always recreate shortcuts so upgrades never leave a stale target.
+ ${If} $NoShortcutMode = 1
+ ${AndIf} $WixMode = 0
  Return
- ${EndIf}
-
- ; Skip creating shortcut if in update mode or no shortcut mode
- ; but always create if migrating from wix
- ${If} $WixMode = 0
- ${If} $UpdateMode = 1
- ${OrIf} $NoShortcutMode = 1
- Return
- ${EndIf}
  ${EndIf}
 
  !if "${STARTMENUFOLDER}" != ""
@@ -948,22 +929,9 @@ Function CreateOrUpdateStartMenuShortcut
 FunctionEnd
 
 Function CreateOrUpdateDesktopShortcut
- ; We used to use product name as MAINBINARYNAME
- ; migrate old shortcuts to target the new MAINBINARYNAME
- !insertmacro IsShortcutTarget "$DESKTOP\${PRODUCTNAME}.lnk" "$INSTDIR\$OldMainBinaryName"
- Pop $0
- ${If} $0 = 1
- !insertmacro SetShortcutTarget "$DESKTOP\${PRODUCTNAME}.lnk" "$INSTDIR\${MAINBINARYNAME}.exe"
+ ${If} $NoShortcutMode = 1
+ ${AndIf} $WixMode = 0
  Return
- ${EndIf}
-
- ; Skip creating shortcut if in update mode or no shortcut mode
- ; but always create if migrating from wix
- ${If} $WixMode = 0
- ${If} $UpdateMode = 1
- ${OrIf} $NoShortcutMode = 1
- Return
- ${EndIf}
  ${EndIf}
 
  CreateShortcut "$DESKTOP\${PRODUCTNAME}.lnk" "$INSTDIR\${MAINBINARYNAME}.exe"
