@@ -407,4 +407,11 @@ def main() -> None:
     """Run the local engine directly, useful for browser-only development."""
     import uvicorn
 
-    uvicorn.run("anki_helper.backend:app", host="127.0.0.1", port=8765, reload=False)
+    uvicorn.run(
+        "anki_helper.backend:app",
+        host="127.0.0.1",
+        port=8765,
+        reload=False,
+        log_config=None,
+        access_log=False,
+    )

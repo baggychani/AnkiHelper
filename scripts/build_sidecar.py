@@ -23,6 +23,7 @@ def main() -> None:
         "--noconfirm",
         "--clean",
         "--onefile",
+        "--noconsole",
         "--name",
         "anki-helper-backend",
         "--paths",

@@ -3,5 +3,20 @@
   "identifier": "default",
   "description": "Capabilities for the main desktop window",
   "windows": ["main"],
-  "permissions": ["core:default", "dialog:default", "fs:default", "fs:write-all", "opener:default"]
+  "permissions": [
+    "core:default",
+    "dialog:default",
+    "fs:default",
+    "fs:write-all",
+    "opener:default",
+    {
+      "identifier": "shell:allow-spawn",
+      "allow": [
+        {
+          "name": "binaries/anki-helper-backend",
+          "sidecar": true
+        }
+      ]
+    }
+  ]
 }
