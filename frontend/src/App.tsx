@@ -139,7 +139,7 @@ function App() {
           <SideAction label="입력 TSV" icon={Download} compact={!sidebarOpen} disabled={!selected} onClick={() => exportFile('tsv')} />
           <SideAction label="디자인 JSON" icon={Code2} compact={!sidebarOpen} disabled={!selected} onClick={() => exportFile('design')} />
           <SideAction label="다른 이름으로 APKG 저장" icon={HardDrive} compact={!sidebarOpen} disabled={!selected} onClick={() => exportFile('bundle')} />
-          {sidebarOpen && <div className="sidebar-version mx-2 mt-4 border-t border-white/[.07] pt-3 text-[10px] leading-5 text-slate-600"><p>v1.0.2</p><p>© 2026 Bae Gichan</p></div>}
+          {sidebarOpen && <div className="sidebar-version mx-2 mt-4 border-t border-white/[.07] pt-3 text-[10px] leading-5 text-slate-600"><p>v1.0.1</p><p>© 2026 Bae Gichan</p></div>}
         </div>
       </aside>
       <section className="ml-2 flex h-full min-w-0 flex-1 flex-col overflow-hidden lg:ml-4">

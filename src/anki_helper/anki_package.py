@@ -4,6 +4,7 @@ import csv
 import html
 import io
 import json
+import os
 import re
 import sqlite3
 import tempfile
@@ -316,9 +317,16 @@ def _compress_anki21b(data: bytes) -> bytes:
     return zstandard.ZstdCompressor(level=3).compress(data)
 
 
+def _backup_dir() -> Path:
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    base = Path(local_app_data) if local_app_data else Path.home() / "AppData" / "Local"
+    backup_dir = base / "Anki Helper" / "Backups"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    return backup_dir
+
+
 def _backup_source(source: Path) -> Path:
-    backup_dir = source.parent / "AnkiHelper Backups"
-    backup_dir.mkdir(exist_ok=True)
+    backup_dir = _backup_dir()
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     backup = backup_dir / f"{source.stem}_{stamp}{source.suffix}"
     counter = 1
