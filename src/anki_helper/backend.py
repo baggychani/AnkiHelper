@@ -336,6 +336,7 @@ def update_note_field(note_type_id: str, note_index: int, field_order: int, patc
 
 @app.post("/api/note-types/{note_type_id}/clone")
 def clone_note_type(note_type_id: str, payload: NoteTypeClone) -> dict:
+    global _selected_note_type_id
     if _package is None:
         raise HTTPException(status_code=404, detail="먼저 APKG 파일을 열어주세요.")
     name = payload.name.strip()
@@ -348,8 +349,8 @@ def clone_note_type(note_type_id: str, payload: NoteTypeClone) -> dict:
     copied.id = str(uuid4())
     copied.name = name
     copied.source_id = source.id
-    copied.notes = []
     _package.note_types.append(copied)
+    _selected_note_type_id = copied.id
     return _workspace_data() or {}
 
 

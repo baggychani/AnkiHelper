@@ -71,10 +71,18 @@ TSV에는 기존 노트와의 연결을 유지하기 위한 관리 식별자가 
 
 ## 실행
 
-저장소 루트에서 다음 명령을 실행하면 빌드된 데스크톱 앱이 열립니다.
+저장소 루트에서 다음 명령을 실행하면 Anki Helper가 열립니다.
 
 ```powershell
 python .\app.py
+```
+
+기본 동작은 **최신 소스**를 반영합니다. 로컬 `release` 빌드가 없거나 소스보다 오래됐으면 `npm run tauri dev`로 실행하고, 최신 release 빌드가 있으면 그 exe를 실행합니다.
+
+미리 빌드해 둔 release exe만 강제로 실행하려면:
+
+```powershell
+python .\app.py --release
 ```
 
 또는 가상환경을 이용할 수 있습니다.

@@ -9,11 +9,13 @@ import re
 import sqlite3
 import tempfile
 import shutil
+import zlib
 from datetime import datetime
 import zipfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 
 FIELD_TOKEN = re.compile(r"{{(?:#|\^)?\s*([^{}:#]+?)(?::[^{}]+)?\s*}}")
@@ -337,6 +339,124 @@ def _backup_source(source: Path) -> Path:
     return backup
 
 
+def _note_checksum(value: str) -> int:
+    return zlib.crc32(value.encode("utf-8")) & 0xFFFFFFFF
+
+
+def _alloc_note_id(connection: sqlite3.Connection) -> int:
+    note_id = int(connection.execute("SELECT COALESCE(MAX(id), 0) FROM notes").fetchone()[0]) + 1
+    while connection.execute("SELECT 1 FROM notes WHERE id=?", (note_id,)).fetchone():
+        note_id += 1
+    return note_id
+
+
+def _alloc_card_id(connection: sqlite3.Connection) -> int:
+    card_id = int(connection.execute("SELECT COALESCE(MAX(id), 0) FROM cards").fetchone()[0]) + 1
+    while connection.execute("SELECT 1 FROM cards WHERE id=?", (card_id,)).fetchone():
+        card_id += 1
+    return card_id
+
+
+def _default_deck_id(connection: sqlite3.Connection) -> int:
+    row = connection.execute("SELECT did FROM cards ORDER BY id LIMIT 1").fetchone()
+    return int(row[0]) if row else 1
+
+
+def _card_defaults(connection: sqlite3.Connection, source_mid: str | None, ord_idx: int) -> tuple[Any, ...]:
+    if source_mid and str(source_mid).isdigit():
+        row = connection.execute(
+            """
+            SELECT c.type, c.queue, c.ivl, c.factor, c.reps, c.lapses, c.left, c.flags, c.data
+            FROM cards c
+            JOIN notes n ON c.nid = n.id
+            WHERE n.mid = ? AND c.ord = ?
+            LIMIT 1
+            """,
+            (int(source_mid), ord_idx),
+        ).fetchone()
+        if row:
+            return row
+    return (0, 0, 0, 2500, 0, 0, 0, 0, "")
+
+
+def _sync_note_rows_legacy(connection: sqlite3.Connection, package: DeckPackage, note_type: NoteType, model_id: int) -> None:
+    key = str(model_id)
+    note_ids = list(package.note_ids.get(key, []))
+    mod = int(datetime.now().timestamp())
+    deck_id = _default_deck_id(connection)
+
+    for index, note_id in enumerate(note_ids):
+        if index >= len(note_type.notes):
+            break
+        values = note_type.notes[index]
+        connection.execute(
+            "UPDATE notes SET flds=?, mid=?, mod=?, usn=-1 WHERE id=?",
+            ("\x1f".join(values), model_id, mod, note_id),
+        )
+
+    for values in note_type.notes[len(note_ids) :]:
+        note_id = _alloc_note_id(connection)
+        guid = uuid4().hex[:10]
+        sfld = values[0] if values else ""
+        connection.execute(
+            "INSERT INTO notes (id, guid, mid, mod, usn, tags, flds, sfld, csum, flags, data) VALUES (?, ?, ?, ?, -1, '', ?, ?, ?, 0, '')",
+            (note_id, guid, model_id, mod, "\x1f".join(values), sfld, _note_checksum(sfld)),
+        )
+        note_ids.append(note_id)
+        for ord_idx in range(len(note_type.templates)):
+            card_id = _alloc_card_id(connection)
+            card_type, queue, ivl, factor, reps, lapses, left, flags, data = _card_defaults(connection, note_type.source_id, ord_idx)
+            due = int(connection.execute("SELECT COALESCE(MAX(due), 0) + 1 FROM cards WHERE did=?", (deck_id,)).fetchone()[0])
+            connection.execute(
+                """
+                INSERT INTO cards (id, nid, did, ord, mod, usn, type, queue, due, ivl, factor, reps, lapses, left, odue, odid, flags, data)
+                VALUES (?, ?, ?, ?, ?, -1, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)
+                """,
+                (card_id, note_id, deck_id, ord_idx, mod, card_type, queue, due, ivl, factor, reps, lapses, left, flags, data),
+            )
+
+    package.note_ids[key] = note_ids
+
+
+def _sync_note_rows_normalized(connection: sqlite3.Connection, package: DeckPackage, note_type: NoteType, type_id: int) -> None:
+    key = str(type_id)
+    note_ids = list(package.note_ids.get(key, []))
+    mod = int(datetime.now().timestamp())
+    deck_id = _default_deck_id(connection)
+
+    for index, note_id in enumerate(note_ids):
+        if index >= len(note_type.notes):
+            break
+        values = note_type.notes[index]
+        connection.execute(
+            "UPDATE notes SET flds=?, mid=?, mod=?, usn=-1 WHERE id=?",
+            ("\x1f".join(values), type_id, mod, note_id),
+        )
+
+    for values in note_type.notes[len(note_ids) :]:
+        note_id = _alloc_note_id(connection)
+        guid = uuid4().hex[:10]
+        sfld = values[0] if values else ""
+        connection.execute(
+            "INSERT INTO notes (id, guid, mid, mod, usn, tags, flds, sfld, csum, flags, data) VALUES (?, ?, ?, ?, -1, '', ?, ?, ?, 0, '')",
+            (note_id, guid, type_id, mod, "\x1f".join(values), sfld, _note_checksum(sfld)),
+        )
+        note_ids.append(note_id)
+        for ord_idx in range(len(note_type.templates)):
+            card_id = _alloc_card_id(connection)
+            card_type, queue, ivl, factor, reps, lapses, left, flags, data = _card_defaults(connection, note_type.source_id, ord_idx)
+            due = int(connection.execute("SELECT COALESCE(MAX(due), 0) + 1 FROM cards WHERE did=?", (deck_id,)).fetchone()[0])
+            connection.execute(
+                """
+                INSERT INTO cards (id, nid, did, ord, mod, usn, type, queue, due, ivl, factor, reps, lapses, left, odue, odid, flags, data)
+                VALUES (?, ?, ?, ?, ?, -1, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)
+                """,
+                (card_id, note_id, deck_id, ord_idx, mod, card_type, queue, due, ivl, factor, reps, lapses, left, flags, data),
+            )
+
+    package.note_ids[key] = note_ids
+
+
 def _write_legacy_changes(connection: sqlite3.Connection, package: DeckPackage) -> None:
     row = connection.execute("SELECT models FROM col").fetchone()
     models: dict[str, Any] = json.loads(row[0])
@@ -366,8 +486,7 @@ def _write_legacy_changes(connection: sqlite3.Connection, package: DeckPackage) 
                 original_templates[index]["qfmt"] = template.front
                 original_templates[index]["afmt"] = template.back
         model["css"] = note_type.css
-        for note_id, values in zip(package.note_ids.get(note_type.id, []), note_type.notes):
-            connection.execute("UPDATE notes SET flds=?, mod=strftime('%s','now'), usn=-1 WHERE id=?", ("\x1f".join(values), note_id))
+        _sync_note_rows_legacy(connection, package, note_type, int(note_type.id))
     connection.execute("UPDATE col SET models=?, mod=strftime('%s','now'), usn=-1", (json.dumps(models, ensure_ascii=False),))
 
 
@@ -410,8 +529,7 @@ def _write_normalized_changes(connection: sqlite3.Connection, package: DeckPacka
         row = connection.execute("SELECT config FROM notetypes WHERE id=?", (type_id,)).fetchone()
         if row:
             connection.execute("UPDATE notetypes SET name=?, config=?, mtime_secs=strftime('%s','now'), usn=-1 WHERE id=?", (note_type.name, _replace_protobuf_text(row[0], 3, note_type.css), type_id))
-        for note_id, values in zip(package.note_ids.get(note_type.id, []), note_type.notes):
-            connection.execute("UPDATE notes SET flds=?, mod=strftime('%s','now'), usn=-1 WHERE id=?", ("\x1f".join(values), note_id))
+        _sync_note_rows_normalized(connection, package, note_type, type_id)
 
 
 def save_apkg(package: DeckPackage, destination: str | Path | None = None, *, backup: bool = True) -> tuple[Path, Path | None]:
