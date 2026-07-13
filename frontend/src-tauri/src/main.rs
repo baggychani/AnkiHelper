@@ -7,7 +7,32 @@ use std::{
     process::{Child, Command},
     sync::Mutex,
 };
-use tauri::{Manager, RunEvent};
+use tauri::{Manager, RunEvent, WebviewWindow};
+
+const DEFAULT_WINDOW_WIDTH: f64 = 1280.0;
+const DEFAULT_WINDOW_HEIGHT: f64 = 820.0;
+
+fn should_start_maximized(window: &WebviewWindow) -> bool {
+    let monitor = match window.current_monitor() {
+        Ok(Some(monitor)) => monitor,
+        _ => return false,
+    };
+    let scale = monitor.scale_factor();
+    if scale <= 0.0 {
+        return false;
+    }
+
+    let work = monitor.work_area();
+    let logical_width = work.size.width as f64 / scale;
+    let logical_height = work.size.height as f64 / scale;
+    if logical_width <= 0.0 || logical_height <= 0.0 {
+        return false;
+    }
+
+    DEFAULT_WINDOW_HEIGHT > logical_height
+        || DEFAULT_WINDOW_WIDTH >= logical_width * 0.85
+        || DEFAULT_WINDOW_HEIGHT >= logical_height * 0.92
+}
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -158,6 +183,13 @@ fn main() {
                     show_startup_error(&message);
                     return Err(message.into());
                 }
+            }
+
+            if let Some(window) = app.get_webview_window("main") {
+                if should_start_maximized(&window) {
+                    let _ = window.maximize();
+                }
+                let _ = window.show();
             }
             Ok(())
         })
