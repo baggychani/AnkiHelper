@@ -38,10 +38,37 @@ export const api = {
     request<Workspace>(`/api/note-types/${noteTypeId}/fields`, { method: 'POST', body: JSON.stringify({ name }) }),
   deleteField: (noteTypeId: string, order: number) =>
     request<Workspace>(`/api/note-types/${noteTypeId}/fields/${order}`, { method: 'DELETE' }),
+  fieldContentSummary: (noteTypeId: string, order: number) =>
+    request<{
+      field_order: number
+      filled: number
+      text_only: number
+      media_only: number
+      mixed: number
+      has_mixed: boolean
+      destination_filled: Record<string, number>
+      sample_text: string
+      sample_media: string
+    }>(`/api/note-types/${noteTypeId}/fields/${order}/content-summary`),
+  moveFieldContents: (noteTypeId: string, order: number, destinationOrder: number, mode: 'text' | 'media' | 'all') =>
+    request<{ workspace: Workspace; changed: number }>(`/api/note-types/${noteTypeId}/fields/${order}/move`, {
+      method: 'POST',
+      body: JSON.stringify({ destination_order: destinationOrder, mode }),
+    }),
   updateNoteField: (noteTypeId: string, noteIndex: number, fieldOrder: number, value: string) =>
     request<Workspace>(`/api/note-types/${noteTypeId}/notes/${noteIndex}/fields/${fieldOrder}`, { method: 'PATCH', body: JSON.stringify({ value }) }),
-  cloneNoteType: (noteTypeId: string, name: string) =>
-    request<Workspace>(`/api/note-types/${noteTypeId}/clone`, { method: 'POST', body: JSON.stringify({ name }) }),
+  cloneNoteType: (noteTypeId: string, name: string, moveCards = true) =>
+    request<Workspace>(`/api/note-types/${noteTypeId}/clone`, { method: 'POST', body: JSON.stringify({ name, move_cards: moveCards }) }),
+  moveNotes: (noteTypeId: string, destinationId: string, mapping?: Record<number, number>) =>
+    request<{ workspace: Workspace; moved: number }>(`/api/note-types/${noteTypeId}/move-notes`, {
+      method: 'POST',
+      body: JSON.stringify({
+        destination_id: destinationId,
+        mapping: mapping
+          ? Object.fromEntries(Object.entries(mapping).map(([source, destination]) => [String(source), destination]))
+          : null,
+      }),
+    }),
   savePackage: (path?: string) =>
     request<{ workspace: Workspace; saved_to: string; backup: string | null }>('/api/packages/save', { method: 'POST', body: JSON.stringify({ path: path ?? null }) }),
   media: () => request<MediaItem[]>('/api/media'),

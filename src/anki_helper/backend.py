@@ -34,11 +34,16 @@ from .anki_package import (
     export_media,
     export_project,
     export_tsv,
+    field_content_kind,
     import_project,
     media_items,
+    move_note_field_contents,
+    move_notes_between_types,
     read_apkg,
     render_template,
     save_apkg,
+    save_as_note_type,
+    split_field_content,
 )
 
 app = FastAPI(title="Anki Helper local engine", docs_url=None, redoc_url=None)
@@ -91,6 +96,17 @@ class NoteFieldPatch(BaseModel):
 
 class NoteTypeClone(BaseModel):
     name: str
+    move_cards: bool = True
+
+
+class NoteTypeMoveNotes(BaseModel):
+    destination_id: str
+    mapping: dict[str, int] | None = None
+
+
+class FieldMove(BaseModel):
+    destination_order: int
+    mode: Literal["text", "media", "all"] = "all"
 
 
 class SavePackageRequest(BaseModel):
@@ -320,6 +336,57 @@ def delete_field(note_type_id: str, field_order: int) -> dict:
     return _workspace_data() or {}
 
 
+@app.get("/api/note-types/{note_type_id}/fields/{field_order}/content-summary")
+def field_content_summary(note_type_id: str, field_order: int) -> dict:
+    note_type = _get_note_type(note_type_id)
+    if not 0 <= field_order < len(note_type.fields):
+        raise HTTPException(status_code=404, detail="필드를 찾지 못했습니다.")
+    filled = 0
+    text_only = 0
+    media_only = 0
+    mixed = 0
+    destination_filled = {field.order: 0 for field in note_type.fields if field.order != field_order}
+    for values in note_type.notes:
+        while len(values) < len(note_type.fields):
+            values.append("")
+        kind = field_content_kind(values[field_order])
+        if kind != "empty":
+            filled += 1
+        if kind == "text":
+            text_only += 1
+        elif kind == "media":
+            media_only += 1
+        elif kind == "mixed":
+            mixed += 1
+        for order in destination_filled:
+            if values[order].strip():
+                destination_filled[order] += 1
+    sample = next((values[field_order] for values in note_type.notes if values[field_order].strip()), "")
+    sample_text, sample_media = split_field_content(sample)
+    return {
+        "field_order": field_order,
+        "filled": filled,
+        "text_only": text_only,
+        "media_only": media_only,
+        "mixed": mixed,
+        "has_mixed": mixed > 0,
+        "destination_filled": destination_filled,
+        "sample_text": sample_text[:80],
+        "sample_media": sample_media[:120],
+    }
+
+
+@app.post("/api/note-types/{note_type_id}/fields/{field_order}/move")
+def move_field_contents(note_type_id: str, field_order: int, payload: FieldMove) -> dict:
+    note_type = _get_note_type(note_type_id)
+    try:
+        changed = move_note_field_contents(note_type, field_order, payload.destination_order, payload.mode)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    workspace = _workspace_data() or {}
+    return {"workspace": workspace, "changed": changed}
+
+
 @app.patch("/api/note-types/{note_type_id}/notes/{note_index}/fields/{field_order}")
 def update_note_field(note_type_id: str, note_index: int, field_order: int, patch: NoteFieldPatch) -> dict:
     note_type = _get_note_type(note_type_id)
@@ -345,13 +412,28 @@ def clone_note_type(note_type_id: str, payload: NoteTypeClone) -> dict:
     if any(item.name.casefold() == name.casefold() for item in _package.note_types):
         raise HTTPException(status_code=400, detail="같은 이름의 노트 유형이 이미 있습니다.")
     source = _get_note_type(note_type_id)
-    copied = deepcopy(source)
-    copied.id = str(uuid4())
-    copied.name = name
-    copied.source_id = source.id
-    _package.note_types.append(copied)
+    copied = save_as_note_type(_package, source, name, move_cards=payload.move_cards)
     _selected_note_type_id = copied.id
     return _workspace_data() or {}
+
+
+@app.post("/api/note-types/{note_type_id}/move-notes")
+def move_notes(note_type_id: str, payload: NoteTypeMoveNotes) -> dict:
+    if _package is None:
+        raise HTTPException(status_code=404, detail="먼저 APKG 파일을 열어주세요.")
+    source = _get_note_type(note_type_id)
+    destination = _get_note_type(payload.destination_id)
+    mapping = None
+    if payload.mapping is not None:
+        try:
+            mapping = {int(source_order): int(destination_order) for source_order, destination_order in payload.mapping.items()}
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail="필드 대응 정보가 올바르지 않습니다.") from exc
+    try:
+        moved = move_notes_between_types(_package, source, destination, mapping)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"workspace": _workspace_data(), "moved": moved}
 
 
 @app.get("/api/note-types/{note_type_id}/preview")

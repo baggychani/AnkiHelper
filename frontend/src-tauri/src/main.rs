@@ -51,8 +51,23 @@ fn spawn_process(mut command: Command) -> Result<Child, String> {
         .map_err(|error| format!("Could not start the Anki Helper engine: {error}"))
 }
 
+fn free_backend_port() {
+    #[cfg(windows)]
+    {
+        let _ = Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-Command",
+                "Get-NetTCPConnection -LocalPort 8765 -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }",
+            ])
+            .creation_flags(CREATE_NO_WINDOW)
+            .status();
+    }
+}
+
 #[cfg(debug_assertions)]
 fn spawn_dev_backend() -> Result<Child, String> {
+    free_backend_port();
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()
@@ -79,6 +94,7 @@ fn spawn_dev_backend() -> Result<Child, String> {
 }
 
 fn start_backend() -> Result<Child, String> {
+    free_backend_port();
     if let Some(path) = bundled_backend() {
         return spawn_process(Command::new(path));
     }

@@ -2,10 +2,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { open, save } from '@tauri-apps/plugin-dialog'
 import { writeFile } from '@tauri-apps/plugin-fs'
 import {
-  ArrowLeft, ArrowRight, BookOpen, Braces, Check, ChevronRight, Code2, Copy,
+  ArrowLeft, ArrowRight, ArrowRightLeft, BookOpen, Braces, Check, ChevronRight, Code2, Copy,
   Database, Download, FileArchive, FolderOpen, Grid2X2, HardDrive,
   Image, Layers3, ListChecks, LoaderCircle, Music2, Palette, PanelLeft,
-  Play, Plus, Save, Sparkles, Table2, Trash2, X,
+  Play, Plus, Save, Sparkles, Table2, Trash2, Type, X,
 } from 'lucide-react'
 import { api, type Field, type MediaItem, type NoteType, type Workspace } from './api'
 
@@ -144,10 +144,10 @@ function App() {
       </aside>
       <section className="ml-2 flex h-full min-w-0 flex-1 flex-col overflow-hidden lg:ml-4">
         <header className="flex h-[64px] shrink-0 items-center justify-between gap-3 px-2 lg:h-[72px] lg:px-3"><div className="min-w-0"><p className="text-[10px] font-bold tracking-[.06em] text-indigo-500">{workspace ? '현재 노트 유형' : 'ANKI 파일 도구'}</p><h1 className="mt-1 truncate text-lg font-semibold tracking-tight lg:text-xl">{selected?.name ?? '안녕하세요! 반갑습니다.'}</h1></div><div className="flex shrink-0 items-center gap-2">{workspace && <button onClick={persist} disabled={busy || !dirty} className={`inline-flex h-9 items-center gap-2 rounded-xl px-3 text-xs font-semibold transition lg:h-10 lg:px-4 ${dirty ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-500/20' : 'border border-slate-200 bg-white text-slate-400'}`}>{busy ? <LoaderCircle className="animate-spin" size={16} /> : <Save size={16} />}{dirty ? '저장' : '저장됨'}<span className="hidden text-[10px] opacity-65 lg:inline">Ctrl+S</span></button>}<button onClick={choosePackage} disabled={busy} className="inline-flex h-9 items-center gap-2 rounded-xl bg-[#11182a] px-3 text-xs font-semibold text-white lg:h-10 lg:px-4"><FolderOpen size={16} /><span className="hidden sm:inline">파일 열기</span></button></div></header>
-        <div className={`min-h-0 flex-1 px-3 pb-4 ${page === 'design' || page === 'media' ? 'overflow-hidden' : 'overflow-y-auto'}`}>{!workspace ? <Welcome onOpen={choosePackage} busy={busy} /> : page === 'overview' ? <Overview workspace={workspace} selected={selected} onPage={setPage} onSelect={setSelectedId} /> : page === 'data' ? <DataPage noteType={selected} onUpdate={updateCell} /> : page === 'fields' ? <FieldsPage noteType={selected} onRename={(order, name) => mutate(() => api.updateField(selected!.id, order, name))} onAdd={(name) => mutate(() => api.addField(selected!.id, name))} onDelete={(order) => mutate(() => api.deleteField(selected!.id, order))} onClone={(name) => mutate(() => api.cloneNoteType(selected!.id, name), '새 노트 유형으로 전환했습니다. 저장하면 APKG에 반영됩니다.')} /> : page === 'media' ? <MediaPage onExport={() => exportFile('media')} /> : page === 'design' ? <DesignPage noteType={selected} index={templateIndex} setIndex={setTemplateIndex} onSave={(mode, value) => mutate(() => mode === 'css' ? api.updateCss(selected!.id, value) : api.updateTemplate(selected!.id, templateIndex, { [mode]: value }), '카드 디자인을 적용했습니다.')} notify={notify} /> : <PreviewPage noteType={selected} side={side} setSide={setSide} noteIndex={noteIndex} setNoteIndex={setNoteIndex} previewHtml={previewHtml} />}</div>
+        <div className={`min-h-0 flex-1 px-3 pb-4 ${page === 'design' || page === 'media' ? 'overflow-hidden' : 'overflow-y-auto'}`}>{!workspace ? <Welcome onOpen={choosePackage} busy={busy} /> : page === 'overview' ? <Overview workspace={workspace} selected={selected} onPage={setPage} onSelect={setSelectedId} onMoveNotes={async (fromId, toId, mapping) => { try { const result = await api.moveNotes(fromId, toId, mapping); hydrate(result.workspace); setDirty(true); notify(`${result.moved.toLocaleString()}개 카드를 옮겼습니다.`); } catch (caught) { setError(caught instanceof Error ? caught.message : '카드를 옮기지 못했습니다.'); throw caught } }} /> : page === 'data' ? <DataPage noteType={selected} onUpdate={updateCell} /> : page === 'fields' ? <FieldsPage noteType={selected} onRename={(order, name) => mutate(() => api.updateField(selected!.id, order, name))} onAdd={(name) => mutate(() => api.addField(selected!.id, name))} onDelete={(order) => mutate(() => api.deleteField(selected!.id, order))} onMove={async (order, destination, mode) => { const result = await api.moveFieldContents(selected!.id, order, destination, mode); hydrate(result.workspace); setDirty(true); notify(`${result.changed.toLocaleString()}개 노트에서 내용을 이동했습니다.`); return result.changed }} onClone={(name) => mutate(async () => { const next = await api.cloneNoteType(selected!.id, name, true); setPage('overview'); return next }, '카드를 새 노트 유형으로 옮겼습니다. 저장하면 APKG에 반영됩니다.')} /> : page === 'media' ? <MediaPage onExport={() => exportFile('media')} /> : page === 'design' ? <DesignPage noteType={selected} index={templateIndex} setIndex={setTemplateIndex} onSave={(mode, value) => mutate(() => mode === 'css' ? api.updateCss(selected!.id, value) : api.updateTemplate(selected!.id, templateIndex, { [mode]: value }), '카드 디자인을 적용했습니다.')} notify={notify} /> : <PreviewPage noteType={selected} side={side} setSide={setSide} noteIndex={noteIndex} setNoteIndex={setNoteIndex} previewHtml={previewHtml} />}</div>
       </section>
     </div>
-    {toast && <div className="fixed bottom-7 left-1/2 z-[70] -translate-x-1/2 rounded-xl bg-slate-950/88 px-5 py-3 text-sm font-semibold text-white shadow-2xl backdrop-blur"><span className="mr-2 text-emerald-400">✓</span>{toast}</div>}
+    {toast && <div className="fixed bottom-7 left-1/2 z-[70] -translate-x-1/2 rounded-xl bg-[#0b1426] px-5 py-3 text-sm font-semibold text-white shadow-2xl ring-1 ring-white/10"><span className="mr-2 text-emerald-400">✓</span>{toast}</div>}
     {error && <Modal title="작업을 완료하지 못했습니다" description={error} tone="danger" confirmLabel="확인" onConfirm={() => setError('')} />}
   </main>
 }
@@ -156,7 +156,182 @@ function SideAction({ label, icon: Icon, compact, disabled, onClick }: { label: 
 
 function Welcome({ onOpen, busy }: { onOpen: () => void; busy: boolean }) { return <div className="relative grid min-h-[calc(100vh-96px)] place-items-center overflow-hidden rounded-[22px] bg-[#0d1425] px-5 lg:min-h-[calc(100vh-110px)] lg:rounded-[28px] lg:px-6"><div className="absolute inset-0 bg-[radial-gradient(ellipse_at_18%_22%,rgba(99,102,241,.32),transparent_36%),radial-gradient(ellipse_at_80%_78%,rgba(20,184,166,.17),transparent_37%)]" /><div className="relative max-w-xl text-center"><div className="mx-auto mb-5 grid h-14 w-14 place-items-center rounded-[19px] bg-white/10 ring-1 ring-white/15 lg:mb-7 lg:h-16 lg:w-16 lg:rounded-[22px]"><Sparkles className="text-violet-200" size={29} /></div><p className="mb-3 text-[11px] font-bold tracking-[.24em] text-indigo-300 lg:mb-4">ANKI HELPER</p><h2 className="text-[34px] font-semibold leading-tight tracking-[-.045em] text-white sm:text-[38px] lg:text-[42px]">파일 하나를 열고<br /><span className="bg-gradient-to-r from-violet-300 to-cyan-200 bg-clip-text text-transparent">바로 작업하세요.</span></h2><p className="mt-4 text-sm leading-6 text-slate-400">APKG와 Anki Helper 편집 프로젝트(.zip)를 모두 열 수 있습니다.</p><button onClick={onOpen} disabled={busy} className="mt-6 inline-flex h-11 items-center gap-2 rounded-xl bg-white px-5 text-sm font-semibold text-slate-900 lg:mt-7 lg:h-12">{busy ? <LoaderCircle className="animate-spin" size={18} /> : <FolderOpen size={18} />}파일 열기</button></div></div> }
 
-function Overview({ workspace, selected, onPage, onSelect }: { workspace: Workspace; selected?: NoteType; onPage: (page: Page) => void; onSelect: (id: string) => void }) { return <div className="mx-auto max-w-[1420px] space-y-4 lg:space-y-5"><section className="rounded-[20px] bg-[#151d31] px-5 py-5 text-white lg:rounded-[26px] lg:px-8 lg:py-7"><div className="flex flex-wrap items-end justify-between gap-3"><div className="min-w-0"><div className="mb-2 flex items-center gap-2 truncate text-[11px] text-indigo-200 lg:mb-3"><BookOpen size={14} className="shrink-0" />{workspace.source_name}</div><h2 className="truncate text-xl font-semibold lg:text-2xl">{selected?.name}</h2></div><span className="rounded-full bg-white/10 px-3 py-1.5 text-xs text-slate-300">원본은 저장할 때 자동 백업됩니다</span></div></section><section className="grid grid-cols-1 gap-3 sm:grid-cols-3 lg:gap-4"><Stat label="카드" value={selected?.notes.length ?? 0} icon={BookOpen} /><FieldSummary fields={selected?.fields ?? []} /><Stat label="미디어" value={workspace.media_count} icon={Music2} /></section><section className="grid gap-4 lg:grid-cols-[1.2fr_.8fr] lg:gap-5"><Card title="노트 유형"><div className="space-y-2">{workspace.note_types.map((item, index) => <button key={item.id} onClick={() => { onSelect(item.id); onPage('data') }} className={`flex w-full items-center gap-3 rounded-xl px-4 py-3 text-left ${item.id === selected?.id ? 'bg-indigo-50 ring-1 ring-indigo-200' : 'bg-slate-50 hover:bg-slate-100'}`}><span className="grid h-8 w-8 place-items-center rounded-lg bg-indigo-600 text-xs font-bold text-white">{index + 1}</span><span className="min-w-0"><b className="block truncate text-sm">{item.name}</b><small className="text-slate-400">{item.notes.length}개 카드 · {item.fields.length}개 필드</small></span></button>)}</div></Card><Card title="바로가기"><div className="space-y-2"><Quick label="카드 데이터" icon={Table2} onClick={() => onPage('data')} /><Quick label="필드 관리" icon={ListChecks} onClick={() => onPage('fields')} /><Quick label="미디어 관리" icon={Music2} onClick={() => onPage('media')} /><Quick label="카드 디자인" icon={Braces} onClick={() => onPage('design')} /></div></Card></section></div> }
+function defaultFieldMapping(source: NoteType, destination: NoteType): Record<number, number> {
+  const mapping: Record<number, number> = {}
+  const used = new Set<number>()
+  for (const dest of destination.fields) {
+    const match = source.fields.find((field) => field.name.toLowerCase() === dest.name.toLowerCase())
+    if (match && !used.has(dest.order)) {
+      mapping[match.order] = dest.order
+      used.add(dest.order)
+    }
+  }
+  return mapping
+}
+
+function Overview({ workspace, selected, onPage, onSelect, onMoveNotes }: {
+  workspace: Workspace
+  selected?: NoteType
+  onPage: (page: Page) => void
+  onSelect: (id: string) => void
+  onMoveNotes: (fromId: string, toId: string, mapping: Record<number, number>) => Promise<void>
+}) {
+  const [movingFrom, setMovingFrom] = useState<NoteType | null>(null)
+  const [movingTo, setMovingTo] = useState<NoteType | null>(null)
+  const [mapping, setMapping] = useState<Record<number, number>>({})
+  const [activeSource, setActiveSource] = useState<number | null>(null)
+  const [busyMove, setBusyMove] = useState(false)
+  const mapRef = useRef<HTMLDivElement | null>(null)
+  const [lineBox, setLineBox] = useState({ width: 0, height: 0 })
+  const otherTypes = movingFrom ? workspace.note_types.filter((item) => item.id !== movingFrom.id) : []
+
+  useEffect(() => {
+    if (!movingTo || !mapRef.current) return
+    const update = () => {
+      if (!mapRef.current) return
+      setLineBox({ width: mapRef.current.clientWidth, height: mapRef.current.clientHeight })
+    }
+    update()
+    window.addEventListener('resize', update)
+    return () => window.removeEventListener('resize', update)
+  }, [movingTo, mapping, movingFrom])
+
+  const closeMove = () => {
+    setMovingFrom(null)
+    setMovingTo(null)
+    setMapping({})
+    setActiveSource(null)
+  }
+
+  const chooseDestination = (item: NoteType) => {
+    if (!movingFrom) return
+    setMovingTo(item)
+    setMapping(defaultFieldMapping(movingFrom, item))
+    setActiveSource(null)
+  }
+
+  const connectField = (destinationOrder: number) => {
+    if (activeSource === null) return
+    setMapping((current) => {
+      const next = { ...current }
+      for (const [source, destination] of Object.entries(next)) {
+        if (Number(destination) === destinationOrder) delete next[Number(source)]
+      }
+      next[activeSource] = destinationOrder
+      return next
+    })
+    setActiveSource(null)
+  }
+
+  const clearSourceLink = (sourceOrder: number) => {
+    setMapping((current) => {
+      const next = { ...current }
+      delete next[sourceOrder]
+      return next
+    })
+  }
+
+  const sourceAnchors = movingFrom?.fields.map((_, index) => 28 + index * 56 + 20) ?? []
+  const destAnchors = movingTo?.fields.map((_, index) => 28 + index * 56 + 20) ?? []
+
+  return <div className="mx-auto max-w-[1420px] space-y-4 lg:space-y-5">
+    <section className="rounded-[20px] bg-[#151d31] px-5 py-5 text-white lg:rounded-[26px] lg:px-8 lg:py-7"><div className="flex flex-wrap items-end justify-between gap-3"><div className="min-w-0"><div className="mb-2 flex items-center gap-2 truncate text-[11px] text-indigo-200 lg:mb-3"><BookOpen size={14} className="shrink-0" />{workspace.source_name}</div><h2 className="truncate text-xl font-semibold lg:text-2xl">{selected?.name}</h2></div><span className="rounded-full bg-white/10 px-3 py-1.5 text-xs text-slate-300">원본은 저장할 때 자동 백업됩니다</span></div></section>
+    <section className="grid grid-cols-1 gap-3 sm:grid-cols-3 lg:gap-4"><Stat label="카드" value={selected?.notes.length ?? 0} icon={BookOpen} /><FieldSummary fields={selected?.fields ?? []} /><Stat label="미디어" value={workspace.media_count} icon={Music2} /></section>
+    <section className="grid gap-4 lg:grid-cols-[1.2fr_.8fr] lg:gap-5">
+      <Card title="노트 유형">
+        <p className="-mt-2 mb-4 text-sm text-slate-400">카드를 다른 노트 유형으로 옮기려면 이동 버튼을 누르세요.</p>
+        <div className="space-y-2">{workspace.note_types.map((item, index) => (
+          <div key={item.id} className={`flex items-center gap-2 rounded-xl px-3 py-2 ${item.id === selected?.id ? 'bg-indigo-50 ring-1 ring-indigo-200' : 'bg-slate-50'}`}>
+            <button onClick={() => { onSelect(item.id); onPage('data') }} className="flex min-w-0 flex-1 items-center gap-3 rounded-lg px-1 py-1 text-left hover:bg-white/70">
+              <span className="grid h-8 w-8 place-items-center rounded-lg bg-indigo-600 text-xs font-bold text-white">{index + 1}</span>
+              <span className="min-w-0"><b className="block truncate text-sm">{item.name}</b><small className="text-slate-400">{item.notes.length}개 카드 · {item.fields.length}개 필드</small></span>
+            </button>
+            <button title="카드 이동" disabled={item.notes.length === 0 || workspace.note_types.length < 2} onClick={() => { setMovingFrom(item); setMovingTo(null) }} className="rounded-lg p-2 text-indigo-600 hover:bg-indigo-100 disabled:opacity-25"><ArrowRightLeft size={16} /></button>
+          </div>
+        ))}</div>
+      </Card>
+      <Card title="바로가기"><div className="space-y-2"><Quick label="카드 데이터" icon={Table2} onClick={() => onPage('data')} /><Quick label="필드 관리" icon={ListChecks} onClick={() => onPage('fields')} /><Quick label="미디어 관리" icon={Music2} onClick={() => onPage('media')} /><Quick label="카드 디자인" icon={Braces} onClick={() => onPage('design')} /></div></Card>
+    </section>
+
+    {movingFrom && !movingTo && (
+      <div className="fixed inset-0 z-[80] grid place-items-center bg-slate-950/40 p-4 backdrop-blur-sm">
+        <div className="w-full max-w-md rounded-[22px] border border-white/70 bg-white p-6 shadow-2xl">
+          <div className="mb-4 grid h-11 w-11 place-items-center rounded-xl bg-indigo-100 text-indigo-600"><ArrowRightLeft size={20} /></div>
+          <h3 className="text-lg font-semibold">‘{movingFrom.name}’ 카드를 어디로 옮길까요?</h3>
+          <p className="mt-2 text-sm leading-6 text-slate-500">{movingFrom.notes.length.toLocaleString()}개 카드가 이동합니다. 다음 단계에서 필드를 선으로 연결합니다.</p>
+          <div className="mt-5 max-h-72 space-y-2 overflow-y-auto">
+            {otherTypes.map((item) => (
+              <button key={item.id} disabled={busyMove} onClick={() => chooseDestination(item)} className="flex w-full items-center justify-between rounded-xl border border-slate-200 px-4 py-3 text-left hover:border-indigo-300 hover:bg-indigo-50 disabled:opacity-50">
+                <span><b className="block text-sm text-slate-700">{item.name}</b><small className="text-xs text-slate-400">현재 {item.notes.length.toLocaleString()}개 카드 · {item.fields.length}개 필드</small></span>
+                <ArrowRight className="text-slate-300" size={16} />
+              </button>
+            ))}
+          </div>
+          <div className="mt-6 flex justify-end"><button onClick={closeMove} className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-semibold text-slate-600">취소</button></div>
+        </div>
+      </div>
+    )}
+
+    {movingFrom && movingTo && (
+      <div className="fixed inset-0 z-[80] grid place-items-center bg-slate-950/40 p-4 backdrop-blur-sm">
+        <div className="w-full max-w-3xl rounded-[22px] border border-white/70 bg-white p-6 shadow-2xl">
+          <div className="mb-4 grid h-11 w-11 place-items-center rounded-xl bg-indigo-100 text-indigo-600"><ArrowRightLeft size={20} /></div>
+          <h3 className="text-lg font-semibold">필드를 선으로 이으세요</h3>
+          <p className="mt-2 text-sm leading-6 text-slate-500">왼쪽(출발: {movingFrom.name})을 누른 뒤 오른쪽(도착: {movingTo.name})을 누르면 연결됩니다. 같은 이름은 자동으로 이어 둡니다.</p>
+          <div ref={mapRef} className="relative mt-5 grid grid-cols-[1fr_72px_1fr] gap-3">
+            <div className="space-y-2">
+              {movingFrom.fields.map((field) => {
+                const linked = mapping[field.order]
+                const active = activeSource === field.order
+                return <button key={field.order} onClick={() => { setActiveSource(field.order); if (linked !== undefined) clearSourceLink(field.order) }} className={`flex h-12 w-full items-center justify-between rounded-xl border px-3 text-left text-sm font-semibold ${active ? 'border-indigo-400 bg-indigo-50 text-indigo-700' : linked !== undefined ? 'border-emerald-300 bg-emerald-50 text-emerald-800' : 'border-slate-200 bg-white text-slate-700'}`}>
+                  <span>{field.name}</span>
+                  <span className={`h-3 w-3 rounded-full ${active || linked !== undefined ? 'bg-indigo-500' : 'bg-slate-300'}`} />
+                </button>
+              })}
+            </div>
+            <div className="relative">
+              <svg className="pointer-events-none absolute inset-0 h-full w-full" width={lineBox.width || 72} height={Math.max(lineBox.height, Math.max(sourceAnchors.length, destAnchors.length) * 56)}>
+                {Object.entries(mapping).map(([source, destination]) => {
+                  const y1 = sourceAnchors[Number(source)] ?? 0
+                  const y2 = destAnchors[Number(destination)] ?? 0
+                  return <path key={`${source}-${destination}`} d={`M 8 ${y1} C 36 ${y1}, 36 ${y2}, 64 ${y2}`} fill="none" stroke="#6366f1" strokeWidth="2.5" />
+                })}
+              </svg>
+            </div>
+            <div className="space-y-2">
+              {movingTo.fields.map((field) => {
+                const taken = Object.values(mapping).includes(field.order)
+                return <button key={field.order} onClick={() => connectField(field.order)} className={`flex h-12 w-full items-center justify-between rounded-xl border px-3 text-left text-sm font-semibold ${taken ? 'border-emerald-300 bg-emerald-50 text-emerald-800' : activeSource !== null ? 'border-indigo-200 bg-indigo-50/40 text-slate-700' : 'border-slate-200 bg-white text-slate-700'}`}>
+                  <span className={`h-3 w-3 rounded-full ${taken ? 'bg-indigo-500' : 'bg-slate-300'}`} />
+                  <span>{field.name}</span>
+                </button>
+              })}
+            </div>
+          </div>
+          <div className="mt-6 flex justify-end gap-2">
+            <button onClick={() => { setMovingTo(null); setMapping({}); setActiveSource(null) }} className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-semibold text-slate-600">뒤로</button>
+            <button
+              disabled={busyMove || Object.keys(mapping).length === 0}
+              onClick={async () => {
+                setBusyMove(true)
+                try {
+                  await onMoveNotes(movingFrom.id, movingTo.id, mapping)
+                  onSelect(movingTo.id)
+                  closeMove()
+                } finally {
+                  setBusyMove(false)
+                }
+              }}
+              className="rounded-xl bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-50"
+            >
+              {busyMove ? '이동 중…' : `${movingFrom.notes.length.toLocaleString()}개 카드 이동`}
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
+  </div>
+}
 function Card({ title, children }: { title: string; children: React.ReactNode }) { return <section className="rounded-[18px] border border-slate-200/70 bg-white p-4 shadow-card lg:rounded-[22px] lg:p-5"><h3 className="mb-4 text-lg font-semibold">{title}</h3>{children}</section> }
 function Stat({ label, value, icon: Icon }: { label: string; value: number; icon: typeof BookOpen }) { return <div className="rounded-[18px] border border-slate-200/70 bg-white p-4 shadow-card lg:rounded-[20px] lg:p-5"><div className="flex items-center justify-between"><div><p className="text-xs font-semibold text-slate-400">{label}</p><p className="mt-2 text-2xl font-semibold lg:text-3xl">{value.toLocaleString()}</p></div><span className="grid h-10 w-10 place-items-center rounded-xl bg-indigo-100 text-indigo-600"><Icon size={19} /></span></div></div> }
 function FieldSummary({ fields }: { fields: Field[] }) { const shown = fields.slice(0, 4); return <div className="rounded-[20px] border border-slate-200/70 bg-white p-5 shadow-card"><p className="text-xs font-semibold text-slate-400">필드 목록</p><div className="mt-3 flex flex-wrap gap-1.5">{shown.map((field) => <span key={field.order} title={field.name} className="max-w-[120px] truncate rounded-lg bg-slate-100 px-2.5 py-1.5 text-xs text-slate-600">{field.name}</span>)}{fields.length > shown.length && <span className="rounded-lg bg-indigo-50 px-2.5 py-1.5 text-xs text-indigo-600">외 {fields.length - shown.length}개</span>}</div><button onClick={() => window.dispatchEvent(new CustomEvent('ankihelper:navigate', { detail: 'fields' }))} className="mt-3 inline-flex items-center gap-1 text-xs font-semibold text-indigo-600">필드 관리에서 전체 보기<ArrowRight size={13} /></button></div> }
@@ -227,11 +402,167 @@ function DataValue({ row, fieldOrder, value = '', onUpdate }: { row: number; fie
   return <button onDoubleClick={() => setEditing(true)} title="더블클릭하여 수정" className="block min-h-9 w-full rounded-lg px-2.5 py-2 text-left leading-5 hover:bg-indigo-50">{value ? <span className="line-clamp-2 whitespace-pre-wrap">{value}</span> : <span className="text-slate-300">—</span>}</button>
 }
 
-function FieldsPage({ noteType, onRename, onAdd, onDelete, onClone }: { noteType?: NoteType; onRename: (order: number, name: string) => Promise<void>; onAdd: (name: string) => Promise<void>; onDelete: (order: number) => Promise<void>; onClone: (name: string) => Promise<void> }) {
-  const [newName, setNewName] = useState(''); const [cloneName, setCloneName] = useState(''); const [deleting, setDeleting] = useState<Field | null>(null)
+function FieldsPage({ noteType, onRename, onAdd, onDelete, onMove, onClone }: {
+  noteType?: NoteType
+  onRename: (order: number, name: string) => Promise<void>
+  onAdd: (name: string) => Promise<void>
+  onDelete: (order: number) => Promise<void>
+  onMove: (order: number, destination: number, mode: 'text' | 'media' | 'all') => Promise<number>
+  onClone: (name: string) => Promise<void>
+}) {
+  const [newName, setNewName] = useState('')
+  const [cloneName, setCloneName] = useState('')
+  const [deleting, setDeleting] = useState<Field | null>(null)
+  const [moving, setMoving] = useState<Field | null>(null)
+  const [moveStep, setMoveStep] = useState<'destination' | 'payload' | 'confirm'>('destination')
+  const [destination, setDestination] = useState<Field | null>(null)
+  const [moveMode, setMoveMode] = useState<'text' | 'media' | 'all'>('all')
+  const [summary, setSummary] = useState<{ filled: number; mixed: number; has_mixed: boolean; destination_filled: Record<string, number>; sample_text: string; sample_media: string } | null>(null)
+  const [busyMove, setBusyMove] = useState(false)
+
   if (!noteType) return null
   const filled = deleting ? noteType.notes.filter((row) => Boolean(row[deleting.order]?.trim())).length : 0
-  return <div className="mx-auto max-w-[1420px] space-y-5"><Card title="필드 구성"><p className="-mt-2 mb-5 text-sm text-slate-400">이름을 바꾸면 카드 디자인의 필드 참조도 함께 바뀝니다.</p><div className="mb-5 overflow-auto rounded-xl border border-slate-200"><table className="min-w-full text-left text-sm"><thead className="bg-slate-50 text-xs text-slate-400"><tr>{noteType.fields.map((field) => <th key={field.order} className="px-3 py-2 font-semibold">{field.name}</th>)}</tr></thead><tbody>{noteType.notes.slice(0, 2).map((row, index) => <tr key={index} className="border-t border-slate-100">{noteType.fields.map((field) => <td key={field.order} className="max-w-[180px] truncate px-3 py-2 text-slate-600">{row[field.order] || '—'}</td>)}</tr>)}</tbody></table></div><div className="grid gap-2 md:grid-cols-2">{noteType.fields.map((field) => <div key={`${field.order}-${field.name}`} className="flex items-center gap-3 rounded-xl border border-slate-200 px-3 py-2"><span className="w-7 text-xs font-bold text-slate-400">{String(field.order + 1).padStart(2, '0')}</span><input defaultValue={field.name} onBlur={(event) => { const value = event.currentTarget.value.trim(); if (value && value !== field.name) void onRename(field.order, value) }} className="min-w-0 flex-1 bg-transparent text-sm font-medium outline-none" /><button onClick={() => setDeleting(field)} disabled={noteType.fields.length <= 1} className="rounded-lg p-2 text-rose-500 hover:bg-rose-50 disabled:opacity-25"><Trash2 size={15} /></button></div>)}</div><form className="mt-4 flex gap-2" onSubmit={async (event) => { event.preventDefault(); if (newName.trim()) { await onAdd(newName.trim()); setNewName('') } }}><input value={newName} onChange={(event) => setNewName(event.target.value)} placeholder="새 필드 이름" className="min-w-0 flex-1 rounded-xl border border-slate-200 px-3 py-2.5 text-sm outline-none focus:border-indigo-300" /><button className="inline-flex items-center gap-2 rounded-xl bg-[#151d31] px-4 text-sm font-semibold text-white"><Plus size={15} />필드 추가</button></form></Card><Card title="새 노트 유형으로 복제"><p className="-mt-2 mb-4 text-sm text-slate-400">현재 필드·카드 데이터·디자인을 새 노트 유형으로 복제하고, 바로 그 유형으로 전환합니다. 저장하면 APKG에 새 유형과 카드가 함께 기록됩니다.</p><div className="flex gap-2"><input value={cloneName} onChange={(event) => setCloneName(event.target.value)} placeholder="새 노트 유형 이름" className="min-w-0 flex-1 rounded-xl border border-slate-200 px-3 py-2.5 text-sm outline-none" /><button onClick={async () => { if (cloneName.trim()) { await onClone(cloneName.trim()); setCloneName('') } }} className="rounded-xl border border-indigo-200 px-4 text-sm font-semibold text-indigo-700">복제</button></div></Card>{deleting && <Modal title={`‘${deleting.name}’ 필드를 삭제할까요?`} description={filled ? `${filled.toLocaleString()}개 노트에 내용이 있습니다. 필드 값과 템플릿 참조가 함께 삭제되며 저장 후에는 백업으로만 복구할 수 있습니다.` : '비어 있는 필드입니다. 템플릿의 필드 참조도 함께 삭제됩니다.'} tone="danger" confirmLabel="필드 삭제" onCancel={() => setDeleting(null)} onConfirm={async () => { await onDelete(deleting.order); setDeleting(null) }} />}</div>
+
+  const openMove = async (field: Field) => {
+    setMoving(field)
+    setMoveStep('destination')
+    setDestination(null)
+    setMoveMode('all')
+    setSummary(null)
+    try {
+      const next = await api.fieldContentSummary(noteType.id, field.order)
+      setSummary(next)
+    } catch {
+      setSummary({ filled: 0, mixed: 0, has_mixed: false, destination_filled: {}, sample_text: '', sample_media: '' })
+    }
+  }
+
+  const chooseDestination = (field: Field) => {
+    setDestination(field)
+    if (summary?.has_mixed) {
+      setMoveStep('payload')
+      return
+    }
+    const destFilled = summary?.destination_filled?.[String(field.order)] ?? 0
+    if (destFilled > 0) {
+      setMoveMode('all')
+      setMoveStep('confirm')
+      return
+    }
+    void runMove(field, 'all')
+  }
+
+  const choosePayload = (mode: 'text' | 'media' | 'all') => {
+    if (!destination) return
+    setMoveMode(mode)
+    const destFilled = summary?.destination_filled?.[String(destination.order)] ?? 0
+    if (destFilled > 0) {
+      setMoveStep('confirm')
+      return
+    }
+    void runMove(destination, mode)
+  }
+
+  const runMove = async (target: Field, mode: 'text' | 'media' | 'all') => {
+    if (!moving) return
+    setBusyMove(true)
+    try {
+      await onMove(moving.order, target.order, mode)
+      setMoving(null)
+      setDestination(null)
+      setSummary(null)
+    } finally {
+      setBusyMove(false)
+    }
+  }
+
+  return <div className="mx-auto max-w-[1420px] space-y-5">
+    <Card title="필드 구성">
+      <p className="-mt-2 mb-5 text-sm text-slate-400">이름을 바꾸면 카드 디자인의 필드 참조도 함께 바뀝니다. 내용이 잘못된 칸에 들어갔다면 이동 버튼으로 텍스트와 미디어를 옮길 수 있습니다.</p>
+      <div className="mb-5 overflow-auto rounded-xl border border-slate-200">
+        <table className="min-w-full text-left text-sm">
+          <thead className="bg-slate-50 text-xs text-slate-400"><tr>{noteType.fields.map((field) => <th key={field.order} className="px-3 py-2 font-semibold">{field.name}</th>)}</tr></thead>
+          <tbody>{noteType.notes.slice(0, 2).map((row, index) => <tr key={index} className="border-t border-slate-100">{noteType.fields.map((field) => <td key={field.order} className="max-w-[180px] truncate px-3 py-2 text-slate-600">{row[field.order] || '—'}</td>)}</tr>)}</tbody>
+        </table>
+      </div>
+      <div className="grid gap-2 md:grid-cols-2">{noteType.fields.map((field) => (
+        <div key={`${field.order}-${field.name}`} className="flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2">
+          <span className="w-7 text-xs font-bold text-slate-400">{String(field.order + 1).padStart(2, '0')}</span>
+          <input defaultValue={field.name} onBlur={(event) => { const value = event.currentTarget.value.trim(); if (value && value !== field.name) void onRename(field.order, value) }} className="min-w-0 flex-1 bg-transparent text-sm font-medium outline-none" />
+          <button title="내용 이동" onClick={() => void openMove(field)} className="rounded-lg p-2 text-indigo-600 hover:bg-indigo-50"><ArrowRightLeft size={15} /></button>
+          <button title="필드 삭제" onClick={() => setDeleting(field)} disabled={noteType.fields.length <= 1} className="rounded-lg p-2 text-rose-500 hover:bg-rose-50 disabled:opacity-25"><Trash2 size={15} /></button>
+        </div>
+      ))}</div>
+      <form className="mt-4 flex gap-2" onSubmit={async (event) => { event.preventDefault(); if (newName.trim()) { await onAdd(newName.trim()); setNewName('') } }}>
+        <input value={newName} onChange={(event) => setNewName(event.target.value)} placeholder="새 필드 이름" className="min-w-0 flex-1 rounded-xl border border-slate-200 px-3 py-2.5 text-sm outline-none focus:border-indigo-300" />
+        <button className="inline-flex items-center gap-2 rounded-xl bg-[#151d31] px-4 text-sm font-semibold text-white"><Plus size={15} />필드 추가</button>
+      </form>
+    </Card>
+
+    <Card title="새 노트 유형으로 저장">
+      <p className="-mt-2 mb-4 text-sm leading-6 text-slate-400">지금 구성을 <b className="font-semibold text-slate-600">새 노트 유형</b>으로 만들고, <b className="font-semibold text-slate-600">카드도 함께 옮깁니다</b>. 원래 유형은 카드 0개가 됩니다.<br />Anki에서 기존 공유 유형을 덮어쓰지 않으려면 이 방법이 안전합니다.</p>
+      <div className="flex gap-2">
+        <input value={cloneName} onChange={(event) => setCloneName(event.target.value)} placeholder="새 노트 유형 이름" className="min-w-0 flex-1 rounded-xl border border-slate-200 px-3 py-2.5 text-sm outline-none" />
+        <button onClick={async () => { if (cloneName.trim()) { await onClone(cloneName.trim()); setCloneName('') } }} className="rounded-xl border border-indigo-200 px-4 text-sm font-semibold text-indigo-700">저장</button>
+      </div>
+    </Card>
+
+    {deleting && <Modal title={`‘${deleting.name}’ 필드를 삭제할까요?`} description={filled ? `${filled.toLocaleString()}개 노트에 내용이 있습니다. 필드 값과 템플릿 참조가 함께 삭제되며 저장 후에는 백업으로만 복구할 수 있습니다.` : '비어 있는 필드입니다. 템플릿의 필드 참조도 함께 삭제됩니다.'} tone="danger" confirmLabel="필드 삭제" onCancel={() => setDeleting(null)} onConfirm={async () => { await onDelete(deleting.order); setDeleting(null) }} />}
+
+    {moving && (
+      <div className="fixed inset-0 z-[80] grid place-items-center bg-slate-950/40 p-4 backdrop-blur-sm">
+        <div className="w-full max-w-lg rounded-[22px] border border-white/70 bg-white p-6 shadow-2xl">
+          <div className="mb-4 grid h-11 w-11 place-items-center rounded-xl bg-indigo-100 text-indigo-600"><ArrowRightLeft size={20} /></div>
+          {moveStep === 'destination' && (
+            <>
+              <h3 className="text-lg font-semibold">‘{moving.name}’ 내용을 어디로 옮길까요?</h3>
+              <p className="mt-2 text-sm leading-6 text-slate-500">{summary ? `${summary.filled.toLocaleString()}개 노트에 내용이 있습니다.` : '도착할 필드를 선택하세요.'} 도착 필드에 이미 값이 있으면 뒤에 이어 붙입니다.</p>
+              <div className="mt-5 max-h-72 space-y-2 overflow-y-auto">
+                {noteType.fields.filter((field) => field.order !== moving.order).map((field) => {
+                  const occupied = summary?.destination_filled?.[String(field.order)] ?? 0
+                  return <button key={field.order} disabled={busyMove} onClick={() => chooseDestination(field)} className="flex w-full items-center justify-between rounded-xl border border-slate-200 px-4 py-3 text-left hover:border-indigo-300 hover:bg-indigo-50 disabled:opacity-50">
+                    <span><b className="block text-sm text-slate-700">{field.name}</b><small className="text-xs text-slate-400">{occupied > 0 ? `${occupied.toLocaleString()}개 노트에 기존 내용 있음` : '비어 있는 필드'}</small></span>
+                    <ArrowRight className="text-slate-300" size={16} />
+                  </button>
+                })}
+              </div>
+            </>
+          )}
+          {moveStep === 'payload' && destination && (
+            <>
+              <h3 className="text-lg font-semibold">무엇을 옮길까요?</h3>
+              <p className="mt-2 text-sm leading-6 text-slate-500">‘{moving.name}’에는 텍스트와 미디어가 섞여 있습니다. 예: {summary?.sample_text || '텍스트'} + {summary?.sample_media || '[sound:…]'}</p>
+              <div className="mt-5 grid gap-3">
+                <button disabled={busyMove} onClick={() => choosePayload('text')} className="flex items-center gap-3 rounded-2xl border border-slate-200 px-4 py-3 text-left hover:border-indigo-300 hover:bg-indigo-50">
+                  <span className="grid h-11 w-11 place-items-center rounded-xl bg-amber-100 text-amber-700"><Type size={20} /></span>
+                  <span><b className="block text-sm text-slate-800">텍스트만</b><small className="text-xs text-slate-400">단어·뜻 같은 글자만 ‘{destination.name}’으로</small></span>
+                </button>
+                <button disabled={busyMove} onClick={() => choosePayload('media')} className="flex items-center gap-3 rounded-2xl border border-slate-200 px-4 py-3 text-left hover:border-indigo-300 hover:bg-indigo-50">
+                  <span className="grid h-11 w-11 place-items-center rounded-xl bg-violet-100 text-violet-700"><Music2 size={20} /></span>
+                  <span><b className="block text-sm text-slate-800">미디어만</b><small className="text-xs text-slate-400">[sound:…] / 이미지 태그만 ‘{destination.name}’으로</small></span>
+                </button>
+                <button disabled={busyMove} onClick={() => choosePayload('all')} className="flex items-center gap-3 rounded-2xl border border-slate-200 px-4 py-3 text-left hover:border-indigo-300 hover:bg-indigo-50">
+                  <span className="grid h-11 w-11 place-items-center rounded-xl bg-slate-900 text-white"><ArrowRightLeft size={20} /></span>
+                  <span><b className="block text-sm text-slate-800">모두</b><small className="text-xs text-slate-400">칸 전체 내용을 ‘{destination.name}’으로</small></span>
+                </button>
+              </div>
+            </>
+          )}
+          {moveStep === 'confirm' && destination && (
+            <>
+              <h3 className="text-lg font-semibold">도착 필드에 이미 내용이 있습니다</h3>
+              <p className="mt-2 text-sm leading-6 text-slate-500">‘{destination.name}’에는 {(summary?.destination_filled?.[String(destination.order)] ?? 0).toLocaleString()}개 노트에 값이 있습니다. 이동하면 기존 내용 뒤에 이어 붙입니다.</p>
+              <div className="mt-6 flex justify-end gap-2">
+                <button onClick={() => setMoveStep(summary?.has_mixed ? 'payload' : 'destination')} className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-semibold text-slate-600">뒤로</button>
+                <button disabled={busyMove} onClick={() => void runMove(destination, moveMode)} className="rounded-xl bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-50">{busyMove ? '이동 중…' : '이어 붙이며 이동'}</button>
+              </div>
+            </>
+          )}
+          {moveStep !== 'confirm' && <div className="mt-6 flex justify-end"><button onClick={() => { setMoving(null); setDestination(null) }} className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-semibold text-slate-600">취소</button></div>}
+        </div>
+      </div>
+    )}
+  </div>
 }
 
 function MediaPage({ onExport }: { onExport: () => void }) {

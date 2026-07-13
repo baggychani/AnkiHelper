@@ -10,15 +10,17 @@ import sqlite3
 import tempfile
 import shutil
 import zlib
+from copy import deepcopy
 from datetime import datetime
 import zipfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 
 FIELD_TOKEN = re.compile(r"{{(?:#|\^)?\s*([^{}:#]+?)(?::[^{}]+)?\s*}}")
+MEDIA_TOKEN = re.compile(r"\[sound:[^\]]+\]|<img\b[^>]*>", re.IGNORECASE)
 
 
 @dataclass(slots=True)
@@ -343,6 +345,158 @@ def _note_checksum(value: str) -> int:
     return zlib.crc32(value.encode("utf-8")) & 0xFFFFFFFF
 
 
+def split_field_content(value: str) -> tuple[str, str]:
+    """Separate plain text from Anki media markers in one field cell."""
+    media_parts = MEDIA_TOKEN.findall(value or "")
+    text = MEDIA_TOKEN.sub(" ", value or "")
+    text = re.sub(r"[ \t]+\n", "\n", text)
+    text = re.sub(r"[ \t]{2,}", " ", text).strip()
+    media = " ".join(part.strip() for part in media_parts if part.strip()).strip()
+    return text, media
+
+
+def field_content_kind(value: str) -> Literal["empty", "text", "media", "mixed"]:
+    text, media = split_field_content(value)
+    if text and media:
+        return "mixed"
+    if media:
+        return "media"
+    if text:
+        return "text"
+    return "empty"
+
+
+def move_field_piece(source: str, destination: str, mode: Literal["text", "media", "all"]) -> tuple[str, str]:
+    """Move text, media markers, or the whole cell from source into destination."""
+    if mode == "all":
+        moved = (source or "").strip()
+        if not moved:
+            return source or "", destination or ""
+        if (destination or "").strip():
+            return "", f"{destination.strip()} {moved}".strip()
+        return "", moved
+
+    source_text, source_media = split_field_content(source)
+    dest_text, dest_media = split_field_content(destination)
+
+    if mode == "text":
+        if not source_text:
+            return source or "", destination or ""
+        dest_text = f"{dest_text} {source_text}".strip() if dest_text else source_text
+        source_text = ""
+    else:
+        if not source_media:
+            return source or "", destination or ""
+        dest_media = f"{dest_media} {source_media}".strip() if dest_media else source_media
+        source_media = ""
+
+    def join_parts(text: str, media: str) -> str:
+        return " ".join(part for part in (text, media) if part).strip()
+
+    return join_parts(source_text, source_media), join_parts(dest_text, dest_media)
+
+
+def move_note_field_contents(
+    note_type: NoteType,
+    source_order: int,
+    destination_order: int,
+    mode: Literal["text", "media", "all"],
+) -> int:
+    """Move matching content across every note. Returns how many notes changed."""
+    if source_order == destination_order:
+        raise ValueError("같은 필드로 이동할 수 없습니다.")
+    if not 0 <= source_order < len(note_type.fields):
+        raise ValueError("출발 필드를 찾지 못했습니다.")
+    if not 0 <= destination_order < len(note_type.fields):
+        raise ValueError("도착 필드를 찾지 못했습니다.")
+
+    changed = 0
+    for values in note_type.notes:
+        while len(values) < len(note_type.fields):
+            values.append("")
+        before_source = values[source_order]
+        before_destination = values[destination_order]
+        values[source_order], values[destination_order] = move_field_piece(
+            before_source, before_destination, mode
+        )
+        if values[source_order] != before_source or values[destination_order] != before_destination:
+            changed += 1
+    return changed
+
+
+def remap_note_rows(
+    source: NoteType,
+    destination: NoteType,
+    rows: list[list[str]],
+    mapping: dict[int, int] | None = None,
+) -> list[list[str]]:
+    """Map note rows onto another note type.
+
+    ``mapping`` is ``{source_order: destination_order}``. When omitted, fields
+    are matched by name and then by shared order.
+    """
+    if mapping is None:
+        mapping = {}
+        source_by_name = {field.name: field.order for field in source.fields}
+        used_dest: set[int] = set()
+        for field in destination.fields:
+            if field.name in source_by_name:
+                mapping[source_by_name[field.name]] = field.order
+                used_dest.add(field.order)
+        if len(source.fields) == len(destination.fields):
+            for field in source.fields:
+                if field.order not in mapping and field.order not in used_dest:
+                    mapping[field.order] = field.order
+
+    remapped: list[list[str]] = []
+    for row in rows:
+        next_row = [""] * len(destination.fields)
+        for source_order, destination_order in mapping.items():
+            if not 0 <= destination_order < len(destination.fields):
+                continue
+            next_row[destination_order] = row[source_order] if source_order < len(row) else ""
+        remapped.append(next_row)
+    return remapped
+
+
+def move_notes_between_types(
+    package: DeckPackage,
+    source: NoteType,
+    destination: NoteType,
+    mapping: dict[int, int] | None = None,
+) -> int:
+    """Move every note from one note type to another. Returns moved count."""
+    if source.id == destination.id:
+        raise ValueError("같은 노트 유형으로는 이동할 수 없습니다.")
+    moved = len(source.notes)
+    if moved == 0:
+        return 0
+    destination.notes.extend(remap_note_rows(source, destination, source.notes, mapping))
+    source_ids = package.note_ids.pop(source.id, [])
+    package.note_ids.setdefault(destination.id, []).extend(source_ids)
+    source.notes = []
+    package.note_ids[source.id] = []
+    return moved
+
+
+def save_as_note_type(package: DeckPackage, source: NoteType, name: str, *, move_cards: bool = True) -> NoteType:
+    """Create a new note type from the current one, moving cards by default."""
+    copied = deepcopy(source)
+    copied.id = str(uuid4())
+    copied.name = name
+    copied.source_id = source.id
+    if move_cards:
+        copied.notes = source.notes
+        source.notes = []
+        package.note_ids[copied.id] = package.note_ids.pop(source.id, [])
+        package.note_ids[source.id] = []
+    else:
+        copied.notes = deepcopy(source.notes)
+        package.note_ids[copied.id] = []
+    package.note_types.append(copied)
+    return copied
+
+
 def _alloc_note_id(connection: sqlite3.Connection) -> int:
     note_id = int(connection.execute("SELECT COALESCE(MAX(id), 0) FROM notes").fetchone()[0]) + 1
     while connection.execute("SELECT 1 FROM notes WHERE id=?", (note_id,)).fetchone():
@@ -468,8 +622,9 @@ def _write_legacy_changes(connection: sqlite3.Connection, package: DeckPackage) 
         model["id"] = int(new_id)
         model["name"] = note_type.name
         models[new_id] = model
+        previous_id = note_type.id
         note_type.id = new_id
-        package.note_ids[new_id] = []
+        package.note_ids[new_id] = package.note_ids.pop(previous_id, [])
     for note_type in package.note_types:
         model = models.get(note_type.id)
         if model is None:
@@ -510,8 +665,9 @@ def _write_normalized_changes(connection: sqlite3.Connection, package: DeckPacka
             template_config = source_templates[index][3] if index < len(source_templates) else b""
             template_config = _replace_protobuf_text(_replace_protobuf_text(template_config, 1, template.front), 2, template.back)
             connection.execute("INSERT INTO templates (ntid, ord, name, mtime_secs, usn, config) VALUES (?, ?, ?, strftime('%s','now'), -1, ?)", (new_id, index, template.name, template_config))
+        previous_id = note_type.id
         note_type.id = str(new_id)
-        package.note_ids[note_type.id] = []
+        package.note_ids[note_type.id] = package.note_ids.pop(previous_id, [])
     for note_type in package.note_types:
         if not note_type.id.isdigit():
             continue
