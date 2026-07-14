@@ -50,8 +50,8 @@ jobs:
           projectPath: frontend
           tauriScript: npm run tauri
           args: --config src-tauri/tauri.release.conf.json
-          tagName: v__VERSION__
-          releaseName: Anki Helper v__VERSION__
+          tagName: ${{ github.ref_name }}
+          releaseName: Anki Helper ${{ github.ref_name }}
           generateReleaseNotes: false
           releaseBody: |
             Windows용 Anki Helper 설치 파일입니다.

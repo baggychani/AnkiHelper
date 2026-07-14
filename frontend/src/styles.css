@@ -1,4 +1,5 @@
-@import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&display=swap');
+@import url('https://cdn.jsdelivr.net/gh/orioncactus/pretendard/dist/web/variable/pretendardvariable-dynamic-subset.css');
 
 @tailwind base;
 @tailwind components;
@@ -7,7 +8,7 @@
 @layer base {
   * { box-sizing: border-box; }
   html { background: #eef1f7; }
-  body { margin: 0; min-width: 320px; font-family: 'Manrope', 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif; }
+  body { margin: 0; min-width: 320px; font-family: 'Pretendard Variable', Pretendard, 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif; }
   button { font: inherit; }
   textarea { font-family: 'DM Mono', ui-monospace, SFMono-Regular, Consolas, monospace; }
   ::-webkit-scrollbar { width: 10px; height: 10px; }
@@ -17,6 +18,32 @@
 button:focus-visible, input:focus-visible, textarea:focus-visible {
   outline: 2px solid rgba(99, 102, 241, .55);
   outline-offset: 2px;
+}
+
+.welcome-rise {
+  animation: welcome-rise .72s cubic-bezier(.22, 1, .36, 1) both;
+}
+
+.welcome-delay-title { animation-delay: .28s; }
+.welcome-delay-subtitle { animation-delay: .44s; }
+.welcome-delay-copy { animation-delay: .66s; }
+.welcome-delay-action { animation-delay: .82s; }
+
+@keyframes welcome-rise {
+  from {
+    opacity: 0;
+    transform: translateY(18px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .welcome-rise {
+    animation: none;
+  }
 }
 
 /* Card-design tabs should hug their labels instead of stretching across the toolbar. */

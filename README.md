@@ -2,7 +2,7 @@
 
 Anki Helper는 Anki의 `.apkg` 파일을 열어 카드 데이터, 필드, 미디어와 카드 디자인을 한곳에서 편집하는 Windows 데스크톱 앱입니다. 화면은 React와 Tailwind CSS, 데스크톱 실행 환경은 Tauri, APKG 처리는 Python FastAPI가 담당합니다.
 
-현재 버전: **1.1.2**
+현재 버전: **1.1.4**
 
 ## 지원 파일
 
@@ -139,8 +139,8 @@ npm run tauri build
 정식 버전을 배포할 때는 Python·npm·Cargo·Tauri 버전을 동일하게 맞춘 뒤 버전 태그를 푸시합니다.
 
 ```powershell
-git tag v1.1.2
-git push origin v1.1.2
+git tag v1.1.4
+git push origin v1.1.4
 ```
 
 일반 `npm run tauri build`는 이 저장소에서 개발할 때 사용하는 로컬 빌드이며 `.venv`의 Python을 실행합니다. GitHub Release 빌드는 Python 설치가 없는 PC에서도 실행되도록 별도의 `tauri.release.conf.json`과 번들된 Python sidecar를 사용합니다.

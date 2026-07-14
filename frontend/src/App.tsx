@@ -35,6 +35,7 @@ function App() {
   const [toastVisible, setToastVisible] = useState(false)
   const [error, setError] = useState('')
   const [exitPrompt, setExitPrompt] = useState(false)
+  const [dragActive, setDragActive] = useState(false)
   const allowCloseRef = useRef(false)
 
   const selected = useMemo(() => workspace?.note_types.find((item) => item.id === selectedId) ?? workspace?.note_types[0], [workspace, selectedId])
@@ -185,15 +186,44 @@ function App() {
     }
   }
 
-  const choosePackage = async () => {
+  const openPackagePath = useCallback(async (path: string) => {
     if (dirty && !window.confirm('저장하지 않은 변경이 있습니다. 저장하지 않고 다른 파일을 열까요?')) return
-    const path = await open({ multiple: false, filters: [{ name: 'APKG 또는 편집 프로젝트', extensions: ['apkg', 'zip'] }] })
-    if (typeof path !== 'string') return
     setBusy(true); setError('')
     try { hydrate(await api.open(path)); setDirty(false); setPage('overview') }
     catch (caught) { setError(caught instanceof Error ? caught.message : 'APKG를 열지 못했습니다.') }
     finally { setBusy(false) }
+  }, [dirty, hydrate])
+
+  const choosePackage = async () => {
+    const path = await open({ multiple: false, filters: [{ name: 'APKG 또는 편집 프로젝트', extensions: ['apkg', 'zip'] }] })
+    if (typeof path !== 'string') return
+    await openPackagePath(path)
   }
+
+  useEffect(() => {
+    let disposed = false
+    let unlisten: (() => void) | undefined
+    void getCurrentWindow().onDragDropEvent((event) => {
+      if (event.payload.type === 'enter' || event.payload.type === 'over') {
+        setDragActive(true)
+        return
+      }
+      if (event.payload.type === 'leave') {
+        setDragActive(false)
+        return
+      }
+      setDragActive(false)
+      const path = event.payload.paths.find((item) => /\.(apkg|zip)$/i.test(item)) ?? event.payload.paths[0]
+      if (path) void openPackagePath(path)
+    }).then((stop) => {
+      if (disposed) stop()
+      else unlisten = stop
+    }).catch(() => undefined)
+    return () => {
+      disposed = true
+      unlisten?.()
+    }
+  }, [openPackagePath])
 
   const updateCell = async (row: number, fieldOrder: number, value: string) => {
     if (!selected) return
@@ -219,7 +249,7 @@ function App() {
             <SideAction label="입력 TSV" icon={Download} compact={!sidebarOpen} disabled={!selected} onClick={() => exportFile('tsv')} />
             <SideAction label="디자인 JSON" icon={Code2} compact={!sidebarOpen} disabled={!selected} onClick={() => exportFile('design')} />
             <SideAction label="다른 이름으로 APKG 저장" icon={HardDrive} compact={!sidebarOpen} disabled={!selected} onClick={() => exportFile('bundle')} />
-            {sidebarOpen && <div className="sidebar-version mx-2 mt-4 border-t border-white/[.07] pt-3 text-[10px] leading-5 text-slate-600"><p>v1.1.2</p><p>© 2026 Bae Gichan</p></div>}
+            {sidebarOpen && <div className="sidebar-version mx-2 mt-4 border-t border-white/[.07] pt-3 text-[10px] leading-5 text-slate-600"><p>v1.1.4</p><p>© 2026 Bae Gichan</p></div>}
           </div>
         </div>
       </aside>
@@ -244,7 +274,7 @@ function App() {
           </div>
           <div className="flex shrink-0 items-center gap-2">{workspace && <button onClick={persist} disabled={busy || !dirty} className={`inline-flex h-9 items-center gap-2 rounded-xl px-3 text-xs font-semibold transition lg:h-10 lg:px-4 ${dirty ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-500/20' : 'border border-slate-200 bg-white text-slate-400'}`}>{busy ? <LoaderCircle className="animate-spin" size={16} /> : <Save size={16} />}{dirty ? '저장' : '저장됨'}<span className="hidden text-[10px] opacity-65 lg:inline">Ctrl+S</span></button>}<button onClick={choosePackage} disabled={busy} className="inline-flex h-9 items-center gap-2 rounded-xl bg-[#11182a] px-3 text-xs font-semibold text-white lg:h-10 lg:px-4"><FolderOpen size={16} /><span className="hidden sm:inline">파일 열기</span></button></div>
         </header>
-        <div className={`min-h-0 flex-1 px-3 pb-4 ${!workspace || page === 'design' || page === 'media' ? 'overflow-hidden' : 'overflow-y-auto'}`}>{!workspace ? <Welcome onOpen={choosePackage} busy={busy} /> : page === 'overview' ? <Overview workspace={workspace} selected={selected} onPage={setPage} onSelect={(id) => { void selectNoteType(id) }} onDeleteNoteType={(id) => mutate(() => api.deleteNoteType(id), '빈 노트 유형을 제거했습니다. 저장하면 APKG에 반영됩니다.')} onMoveNotes={async (fromId, toId, mapping) => { try { const result = await api.moveNotes(fromId, toId, mapping); hydrate(result.workspace); setDirty(true); notify(`${result.moved.toLocaleString()}개 카드를 옮겼습니다.`); } catch (caught) { setError(caught instanceof Error ? caught.message : '카드를 옮기지 못했습니다.'); throw caught } }} /> : page === 'data' ? <DataPage noteType={selected} onUpdate={updateCell} /> : page === 'fields' ? <FieldsPage noteType={selected} onRename={async (order, name) => { await mutate(() => api.updateField(selected!.id, order, name)) }} onAdd={async (name) => { await mutate(() => api.addField(selected!.id, name)) }} onDelete={async (order) => { await mutate(() => api.deleteField(selected!.id, order)) }} onReorder={async (order, newOrder) => { await mutate(() => api.reorderField(selected!.id, order, newOrder)) }} onMove={async (order, destination, mode) => { const result = await api.moveFieldContents(selected!.id, order, destination, mode); hydrate(result.workspace); setDirty(true); notify(`${result.changed.toLocaleString()}개 노트에서 내용을 이동했습니다.`); return result.changed }} onClone={async (name) => { await mutate(async () => { const next = await api.cloneNoteType(selected!.id, name, true); setPage('overview'); return next }, '카드를 새 노트 유형으로 옮겼습니다. 저장하면 APKG에 반영됩니다.') }} /> : page === 'media' ? <MediaPage onExport={() => exportFile('media')} /> : page === 'design' ? <DesignPage noteType={selected} index={templateIndex} setIndex={setTemplateIndex} onSave={async (mode, value) => { await mutate(() => mode === 'css' ? api.updateCss(selected!.id, value) : api.updateTemplate(selected!.id, templateIndex, { [mode]: value }), '카드 디자인을 적용했습니다.') }} notify={notify} /> : <PreviewPage noteType={selected} side={side} setSide={setSide} noteIndex={noteIndex} setNoteIndex={setNoteIndex} previewHtml={previewHtml} />}</div>
+        <div className={`min-h-0 flex-1 px-3 pb-4 ${!workspace || page === 'design' || page === 'media' ? 'overflow-hidden' : 'overflow-y-auto'}`}>{!workspace ? <Welcome onOpen={choosePackage} busy={busy} dragActive={dragActive} /> : page === 'overview' ? <Overview workspace={workspace} selected={selected} onPage={setPage} onSelect={(id) => { void selectNoteType(id) }} onDeleteNoteType={(id) => mutate(() => api.deleteNoteType(id), '빈 노트 유형을 제거했습니다. 저장하면 APKG에 반영됩니다.')} onMoveNotes={async (fromId, toId, mapping) => { try { const result = await api.moveNotes(fromId, toId, mapping); hydrate(result.workspace); setDirty(true); notify(`${result.moved.toLocaleString()}개 카드를 옮겼습니다.`); } catch (caught) { setError(caught instanceof Error ? caught.message : '카드를 옮기지 못했습니다.'); throw caught } }} /> : page === 'data' ? <DataPage noteType={selected} onUpdate={updateCell} /> : page === 'fields' ? <FieldsPage noteType={selected} onRename={async (order, name) => { await mutate(() => api.updateField(selected!.id, order, name)) }} onAdd={async (name) => { await mutate(() => api.addField(selected!.id, name)) }} onDelete={async (order) => { await mutate(() => api.deleteField(selected!.id, order)) }} onReorder={async (order, newOrder) => { await mutate(() => api.reorderField(selected!.id, order, newOrder)) }} onMove={async (order, destination, mode) => { const result = await api.moveFieldContents(selected!.id, order, destination, mode); hydrate(result.workspace); setDirty(true); notify(`${result.changed.toLocaleString()}개 노트에서 내용을 이동했습니다.`); return result.changed }} onClone={async (name) => { await mutate(async () => { const next = await api.cloneNoteType(selected!.id, name, true); setPage('overview'); return next }, '카드를 새 노트 유형으로 옮겼습니다. 저장하면 APKG에 반영됩니다.') }} /> : page === 'media' ? <MediaPage onExport={() => exportFile('media')} /> : page === 'design' ? <DesignPage noteType={selected} index={templateIndex} setIndex={setTemplateIndex} onSave={async (mode, value) => { await mutate(() => mode === 'css' ? api.updateCss(selected!.id, value) : api.updateTemplate(selected!.id, templateIndex, { [mode]: value }), '카드 디자인을 적용했습니다.') }} notify={notify} /> : <PreviewPage noteType={selected} side={side} setSide={setSide} noteIndex={noteIndex} setNoteIndex={setNoteIndex} previewHtml={previewHtml} />}</div>
       </section>
     </div>
     {toast && <div className={`fixed bottom-7 left-1/2 z-[70] -translate-x-1/2 rounded-xl bg-[#0b1426] px-5 py-3 text-sm font-semibold text-white shadow-2xl ring-1 ring-white/10 transition-opacity duration-300 ${toastVisible ? 'opacity-100' : 'opacity-0'}`}><span className="mr-2 text-emerald-400">✓</span>{toast}</div>}
@@ -272,7 +302,7 @@ function App() {
 
 function SideAction({ label, icon: Icon, compact, disabled, onClick }: { label: string; icon: typeof Download; compact: boolean; disabled?: boolean; onClick: () => void }) { return <button disabled={disabled} onClick={onClick} title={label} className="flex h-9 w-full items-center rounded-xl px-3 text-[11px] font-medium text-slate-500 transition hover:bg-white/[.055] hover:text-slate-200 disabled:opacity-30"><Icon size={16} /><span className={`${compact ? 'w-0 opacity-0' : 'ml-3 opacity-100'} whitespace-nowrap transition-all`}>{label}</span></button> }
 
-function Welcome({ onOpen, busy }: { onOpen: () => void; busy: boolean }) { return <div className="relative grid h-full min-h-0 place-items-center overflow-hidden rounded-[22px] bg-[#0d1425] px-5 lg:rounded-[28px] lg:px-6"><div className="absolute inset-0 bg-[radial-gradient(ellipse_at_18%_22%,rgba(99,102,241,.32),transparent_36%),radial-gradient(ellipse_at_80%_78%,rgba(20,184,166,.17),transparent_37%)]" /><div className="relative max-w-xl text-center"><div className="mx-auto mb-5 grid h-14 w-14 place-items-center rounded-[19px] bg-white/10 ring-1 ring-white/15 lg:mb-7 lg:h-16 lg:w-16 lg:rounded-[22px]"><Sparkles className="text-violet-200" size={29} /></div><h2 className="text-[34px] font-semibold leading-[1.2] tracking-[-.045em] text-white sm:text-[38px] lg:text-[42px]">복잡한 Anki 파일,<br /><span className="bg-gradient-to-r from-violet-300 to-cyan-200 bg-clip-text text-transparent">누구보다 쉽게 다루세요.</span></h2><p className="mt-4 text-sm leading-6 text-slate-400">APKG와 Anki Helper 편집 프로젝트(.zip)를 모두 열 수 있습니다.</p><button onClick={onOpen} disabled={busy} className="mt-6 inline-flex h-11 items-center gap-2 rounded-xl bg-white px-5 text-sm font-semibold text-slate-900 lg:mt-7 lg:h-12">{busy ? <LoaderCircle className="animate-spin" size={18} /> : <FolderOpen size={18} />}파일 열기</button></div></div> }
+function Welcome({ onOpen, busy, dragActive }: { onOpen: () => void; busy: boolean; dragActive: boolean }) { return <div className={`relative grid h-full min-h-0 place-items-center overflow-hidden rounded-[22px] bg-[#0d1425] px-5 transition lg:rounded-[28px] lg:px-6 ${dragActive ? 'ring-2 ring-cyan-200/80 ring-offset-4 ring-offset-[#eef1f7]' : ''}`}><div className="absolute inset-0 bg-[radial-gradient(ellipse_at_18%_22%,rgba(99,102,241,.32),transparent_36%),radial-gradient(ellipse_at_80%_78%,rgba(20,184,166,.17),transparent_37%)]" /><div className={`pointer-events-none absolute inset-4 rounded-[18px] border border-dashed border-cyan-200/0 transition lg:rounded-[24px] ${dragActive ? 'border-cyan-200/70 bg-cyan-200/[.04]' : ''}`} /><div className="relative max-w-xl text-center"><div className="welcome-rise mx-auto mb-5 grid h-14 w-14 place-items-center rounded-[19px] bg-white/10 ring-1 ring-white/15 lg:mb-7 lg:h-16 lg:w-16 lg:rounded-[22px]"><Sparkles className="text-violet-200" size={29} /></div><h2 className="text-[34px] font-semibold leading-[1.2] tracking-[-.045em] text-white sm:text-[38px] lg:text-[42px]"><span className="welcome-rise welcome-delay-title block">복잡한 Anki 파일,</span><span className="welcome-rise welcome-delay-subtitle block bg-gradient-to-r from-violet-300 to-cyan-200 bg-clip-text text-transparent">누구보다 쉽게 다루세요.</span></h2><p className="welcome-rise welcome-delay-copy mt-4 text-sm leading-6 text-slate-400">APKG와 Anki Helper 편집 프로젝트(.zip)를 모두 열 수 있습니다.</p><button onClick={onOpen} disabled={busy} className="welcome-rise welcome-delay-action mt-6 inline-flex h-11 items-center gap-2 rounded-xl bg-white px-5 text-sm font-semibold text-slate-900 lg:mt-7 lg:h-12">{busy ? <LoaderCircle className="animate-spin" size={18} /> : <FolderOpen size={18} />}파일 열기</button></div></div> }
 
 function defaultFieldMapping(source: NoteType, destination: NoteType): Record<number, number> {
   const mapping: Record<number, number> = {}
