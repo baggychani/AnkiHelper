@@ -5,6 +5,11 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "릴리스 태그 (예: v1.2.0)"
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -32,6 +37,28 @@ jobs:
         with:
           workspaces: frontend/src-tauri
 
+      - name: Validate release tag and app version
+        id: release
+        shell: pwsh
+        run: |
+          $tag = if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch') { '${{ inputs.tag }}'.Trim() } else { $env:GITHUB_REF_NAME }
+          if ($tag -notmatch '^v(?<version>\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$') {
+            throw "릴리스 태그는 v1.2.0 형식이어야 합니다: $tag"
+          }
+          $version = $Matches.version
+          $versions = @(
+            (Get-Content -Raw frontend/package.json | ConvertFrom-Json).version,
+            (Get-Content -Raw frontend/src-tauri/tauri.conf.json | ConvertFrom-Json).version,
+            (Select-String -Path pyproject.toml -Pattern '^version\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value,
+            (Select-String -Path frontend/src-tauri/Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value,
+            (Select-String -Path src/anki_helper/__init__.py -Pattern '__version__\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
+          )
+          $mismatches = $versions | Where-Object { $_ -ne $version }
+          if ($mismatches) {
+            throw "태그 $tag 와 앱 버전이 일치하지 않습니다. 모든 매니페스트를 $version 으로 맞춘 뒤 다시 실행하세요."
+          }
+          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
       - name: Install Python dependencies
         run: python -m pip install -r requirements.txt pyinstaller
 
@@ -50,8 +77,8 @@ jobs:
           projectPath: frontend
           tauriScript: npm run tauri
           args: --config src-tauri/tauri.release.conf.json
-          tagName: ${{ github.ref_name }}
-          releaseName: Anki Helper ${{ github.ref_name }}
+          tagName: ${{ steps.release.outputs.tag }}
+          releaseName: Anki Helper ${{ steps.release.outputs.tag }}
           generateReleaseNotes: false
           releaseBody: |
             Windows용 Anki Helper 설치 파일입니다.
