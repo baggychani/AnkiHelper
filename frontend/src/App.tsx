@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { open, save } from '@tauri-apps/plugin-dialog'
 import { writeFile } from '@tauri-apps/plugin-fs'
+import { openUrl } from '@tauri-apps/plugin-opener'
 import { invoke } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import {
   ArrowLeft, ArrowRight, ArrowRightLeft, BookOpen, Braces, Check, ChevronDown, ChevronRight, ChevronUp, Code2, Copy,
-  Database, Download, FileArchive, FolderOpen, Grid2X2, HardDrive,
+  ArrowUpRight, Database, Download, FileArchive, FolderOpen, Grid2X2, HardDrive,
   FileSpreadsheet, Image, Layers3, ListChecks, LoaderCircle, LogOut, Music2, Palette, PanelLeft,
   Play, Plus, Save, Sparkles, Table2, Trash2, Type, X,
 } from 'lucide-react'
@@ -15,6 +16,23 @@ type Page = 'overview' | 'data' | 'fields' | 'media' | 'design' | 'preview'
 type EditorMode = 'front' | 'back' | 'css'
 type ExportKind = 'tsv' | 'design' | 'bundle' | 'media' | 'project'
 type PendingWork = { kind: 'open-picker' | 'table-picker' | 'open-path'; path?: string }
+type AvailableUpdate = { version: string; url: string }
+
+const UPDATE_CHECK_INTERVAL_MS = 12 * 60 * 60 * 1000
+const UPDATE_CHECK_STORAGE_KEY = 'anki-helper:update-last-check'
+const RELEASES_API_URL = 'https://api.github.com/repos/baggychani/AnkiHelper/releases/latest'
+
+function isNewerVersion(candidate: string, current: string) {
+  const toParts = (version: string) => version.replace(/^v/i, '').split(/[+-]/, 1)[0].split('.').map((part) => Number.parseInt(part, 10) || 0)
+  const candidateParts = toParts(candidate)
+  const currentParts = toParts(current)
+  const total = Math.max(candidateParts.length, currentParts.length)
+  for (let index = 0; index < total; index += 1) {
+    const difference = (candidateParts[index] ?? 0) - (currentParts[index] ?? 0)
+    if (difference !== 0) return difference > 0
+  }
+  return false
+}
 
 const navItems = [
   ['overview', '개요', Grid2X2], ['data', '카드 데이터', Table2],
@@ -41,6 +59,7 @@ function App() {
   const [tableImport, setTableImport] = useState<{ path: string; preview: TablePreview } | null>(null)
   const [pendingWork, setPendingWork] = useState<PendingWork | null>(null)
   const [newWorkMenuOpen, setNewWorkMenuOpen] = useState(false)
+  const [availableUpdate, setAvailableUpdate] = useState<AvailableUpdate | null>(null)
   const allowCloseRef = useRef(false)
   const newWorkMenuRef = useRef<HTMLDivElement | null>(null)
 
@@ -50,6 +69,38 @@ function App() {
       window.requestAnimationFrame(() => { void invoke('show_main_window').catch(() => undefined) })
     })
     return () => window.cancelAnimationFrame(firstFrame)
+  }, [])
+
+  useEffect(() => {
+    if (!('__TAURI_INTERNALS__' in window)) return
+    const lastCheck = Number.parseInt(window.localStorage.getItem(UPDATE_CHECK_STORAGE_KEY) ?? '0', 10)
+    if (Number.isFinite(lastCheck) && Date.now() - lastCheck < UPDATE_CHECK_INTERVAL_MS) return
+
+    const controller = new AbortController()
+    const timer = window.setTimeout(() => controller.abort(), 5000)
+    const checkForUpdate = async () => {
+      window.localStorage.setItem(UPDATE_CHECK_STORAGE_KEY, String(Date.now()))
+      try {
+        const response = await fetch(RELEASES_API_URL, {
+          headers: { Accept: 'application/vnd.github+json' },
+          signal: controller.signal,
+        })
+        if (!response.ok) return
+        const release = await response.json() as { tag_name?: string; html_url?: string; draft?: boolean; prerelease?: boolean }
+        if (!release.tag_name || !release.html_url || release.draft || release.prerelease || !isNewerVersion(release.tag_name, __APP_VERSION__)) return
+        setAvailableUpdate({ version: release.tag_name.replace(/^v/i, ''), url: release.html_url })
+      } catch {
+        // Update discovery is deliberately quiet: the app remains fully usable offline.
+      } finally {
+        window.clearTimeout(timer)
+      }
+    }
+    const start = window.setTimeout(() => { void checkForUpdate() }, 1200)
+    return () => {
+      window.clearTimeout(start)
+      window.clearTimeout(timer)
+      controller.abort()
+    }
   }, [])
 
   const selected = useMemo(() => workspace?.note_types.find((item) => item.id === selectedId) ?? workspace?.note_types[0], [workspace, selectedId])
@@ -352,6 +403,7 @@ function App() {
     {error && <Modal title="작업을 완료하지 못했습니다" description={error} tone="danger" confirmLabel="확인" onConfirm={() => setError('')} />}
     {pendingWork && <UnsavedWorkModal onCancel={() => setPendingWork(null)} onSave={() => void continuePendingWork(true)} onDiscard={() => void continuePendingWork(false)} />}
     {tableImport && <SpreadsheetImportWizard path={tableImport.path} initial={tableImport.preview} onCancel={() => setTableImport(null)} onSheetChange={(sheet) => api.inspectTable(tableImport.path, sheet)} onCreate={async (payload) => { setBusy(true); setError(''); try { hydrate(await api.createFromTable({ path: tableImport.path, ...payload })); setDirty(true); setPage('overview'); setTableImport(null); notify('새 덱 초안을 만들었습니다. 저장 위치를 선택해 주세요.'); } catch (caught) { setError(caught instanceof Error ? caught.message : '새 덱을 만들지 못했습니다.'); } finally { setBusy(false); } }} />}
+    {availableUpdate && !error && !pendingWork && !tableImport && !exitPrompt && <UpdateAvailableModal update={availableUpdate} onDismiss={() => setAvailableUpdate(null)} onOpen={async () => { setAvailableUpdate(null); try { await openUrl(availableUpdate.url) } catch { setError('업데이트 페이지를 열지 못했습니다. 인터넷 연결을 확인한 뒤 다시 시도해 주세요.') } }} />}
     {exitPrompt && (
       <div className="fixed inset-0 z-[200] grid place-items-center bg-slate-950/45 p-4 backdrop-blur-sm" onClick={() => setExitPrompt(false)}>
         <div role="dialog" aria-modal="true" aria-labelledby="exit-title" className="w-full max-w-md rounded-[22px] border border-white/70 bg-white p-6 shadow-2xl" onClick={(event) => event.stopPropagation()}>
@@ -370,6 +422,42 @@ function App() {
       </div>
     )}
   </main>
+}
+
+function UpdateAvailableModal({ update, onDismiss, onOpen }: { update: AvailableUpdate; onDismiss: () => void; onOpen: () => void | Promise<void> }) {
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        onDismiss()
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onDismiss])
+
+  return <div className="fixed inset-0 z-[160] grid place-items-center bg-slate-950/50 p-4 backdrop-blur-md" onClick={onDismiss}>
+    <section role="dialog" aria-modal="true" aria-labelledby="update-title" className="relative w-full max-w-[470px] overflow-hidden rounded-[28px] border border-white/15 bg-[#111a32] p-6 text-white shadow-[0_32px_90px_rgba(15,23,42,.55)] sm:p-8" onClick={(event) => event.stopPropagation()}>
+      <div className="pointer-events-none absolute -right-20 -top-24 h-56 w-56 rounded-full bg-indigo-500/35 blur-3xl" />
+      <div className="pointer-events-none absolute -bottom-24 -left-16 h-52 w-52 rounded-full bg-cyan-400/20 blur-3xl" />
+      <div className="relative">
+        <div className="flex items-start justify-between gap-6">
+          <div className="grid h-14 w-14 place-items-center rounded-2xl border border-white/15 bg-gradient-to-br from-indigo-400 to-cyan-300 text-[#10192f] shadow-lg shadow-indigo-950/30"><Sparkles size={25} /></div>
+          <button aria-label="업데이트 알림 닫기" onClick={onDismiss} className="grid h-9 w-9 place-items-center rounded-xl text-slate-400 transition hover:bg-white/10 hover:text-white"><X size={19} /></button>
+        </div>
+        <p className="mt-7 text-[11px] font-extrabold tracking-[.18em] text-cyan-200">NEW VERSION AVAILABLE</p>
+        <h2 id="update-title" className="mt-3 text-2xl font-bold tracking-tight sm:text-[28px]">더 나은 Anki Helper가<br /><span className="bg-gradient-to-r from-indigo-200 via-violet-200 to-cyan-200 bg-clip-text text-transparent">준비되어 있어요.</span></h2>
+        <div className="mt-6 flex items-center gap-3 rounded-2xl border border-white/10 bg-white/[.07] px-4 py-3.5">
+          <span className="grid h-9 w-9 place-items-center rounded-xl bg-white/10 text-cyan-200"><Download size={17} /></span>
+          <div><p className="text-xs font-medium text-slate-300">새 버전</p><p className="mt-0.5 text-sm font-bold text-white">Anki Helper {update.version}</p></div>
+        </div>
+        <div className="mt-7 flex flex-col-reverse gap-2.5 sm:flex-row sm:justify-end">
+          <button onClick={onDismiss} className="rounded-xl px-4 py-3 text-sm font-semibold text-slate-300 transition hover:bg-white/10 hover:text-white">나중에</button>
+          <button onClick={() => void onOpen()} className="inline-flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-indigo-500 to-violet-500 px-5 py-3 text-sm font-bold text-white shadow-lg shadow-indigo-950/40 transition hover:-translate-y-0.5 hover:from-indigo-400 hover:to-violet-400 focus:outline-none focus:ring-2 focus:ring-cyan-200/80">업데이트 받기 <ArrowUpRight size={17} /></button>
+        </div>
+      </div>
+    </section>
+  </div>
 }
 
 function SpreadsheetImportWizard({ path, initial, onCancel, onSheetChange, onCreate }: {
