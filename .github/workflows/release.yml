@@ -7,8 +7,8 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "릴리스 태그 (예: v1.2.0)"
-        required: true
+        description: "릴리스 태그 (비우면 코드 버전을 사용, 예: v1.2.0)"
+        required: false
         type: string
 
 permissions:
@@ -41,13 +41,15 @@ jobs:
         id: release
         shell: pwsh
         run: |
-          $tag = if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch') { '${{ inputs.tag }}'.Trim() } else { $env:GITHUB_REF_NAME }
+          $packageVersion = (Get-Content -Raw frontend/package.json | ConvertFrom-Json).version
+          $enteredTag = '${{ inputs.tag }}'.Trim()
+          $tag = if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch' -and $enteredTag) { $enteredTag } elseif ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch') { "v$packageVersion" } else { $env:GITHUB_REF_NAME }
           if ($tag -notmatch '^v(?<version>\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$') {
             throw "릴리스 태그는 v1.2.0 형식이어야 합니다: $tag"
           }
           $version = $Matches.version
           $versions = @(
-            (Get-Content -Raw frontend/package.json | ConvertFrom-Json).version,
+            $packageVersion,
             (Get-Content -Raw frontend/src-tauri/tauri.conf.json | ConvertFrom-Json).version,
             (Select-String -Path pyproject.toml -Pattern '^version\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value,
             (Select-String -Path frontend/src-tauri/Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value,
