@@ -23,6 +23,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
+from starlette.background import BackgroundTask
 
 from .anki_package import (
     ApkgReadError,
@@ -36,6 +37,7 @@ from .anki_package import (
     export_tsv,
     field_content_kind,
     import_project,
+    inspect_table_source,
     media_items,
     move_note_field_contents,
     move_notes_between_types,
@@ -46,6 +48,7 @@ from .anki_package import (
     save_apkg,
     save_as_note_type,
     split_field_content,
+    create_package_from_table,
 )
 
 app = FastAPI(title="Anki Helper local engine", docs_url=None, redoc_url=None)
@@ -69,6 +72,29 @@ _package: DeckPackage | None = None
 _selected_note_type_id: str | None = None
 _requires_save_as = False
 _sound_marker = re.compile(r"<span class='sound' data-sound='([^']+)'>.*?</span>")
+
+
+def _temporary_file_response(path: Path, *, filename: str, media_type: str) -> FileResponse:
+    """Stream a generated download and remove its staging file afterwards."""
+    return FileResponse(
+        path,
+        filename=filename,
+        media_type=media_type,
+        background=BackgroundTask(path.unlink, missing_ok=True),
+    )
+
+
+def _cleanup_ephemeral_package(package: DeckPackage | None, requires_save_as: bool) -> None:
+    """Remove only package copies that this process staged in the temp directory."""
+    if package is None or not requires_save_as:
+        return
+    source = package.source
+    try:
+        temporary_root = Path(tempfile.gettempdir()).resolve()
+        if source.is_file() and temporary_root in source.resolve().parents:
+            source.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 class OpenPackageRequest(BaseModel):
@@ -127,6 +153,29 @@ class ImportProjectRequest(BaseModel):
     path: str
 
 
+class TableInspectRequest(BaseModel):
+    path: str
+    sheet_name: str | None = None
+
+
+class TableCreateRequest(BaseModel):
+    path: str
+    sheet_name: str | None = None
+    first_row_is_header: bool = False
+    field_names: list[str]
+    deck_name: str = "새 덱"
+    note_type_name: str = "기본"
+    front_field: int = 0
+    back_field: int = 1
+    template_source_path: str | None = None
+    template_note_type_id: str | None = None
+    field_mapping: dict[str, int] | None = None
+
+
+class NoteTypeSourceRequest(BaseModel):
+    path: str
+
+
 def _note_type_data(note_type: NoteType) -> dict:
     return {
         "id": note_type.id,
@@ -143,12 +192,30 @@ def _workspace_data() -> dict | None:
         return None
     return {
         "source": str(_package.source),
-        "source_name": _package.source.name,
+        "source_name": _package.display_name or _package.source.name,
         "media_count": len(_package.media),
         "note_types": [_note_type_data(note_type) for note_type in _package.note_types],
         "selected_note_type_id": _selected_note_type_id,
         "requires_save_as": _requires_save_as,
     }
+
+
+def _read_note_type_source(path: str | Path) -> tuple[DeckPackage, Path | None]:
+    """Read an APKG or an exported Anki Helper project as a reusable design source."""
+    source = Path(path)
+    if source.suffix.lower() != ".zip":
+        return read_apkg(source), None
+    try:
+        with zipfile.ZipFile(source) as archive:
+            if "source/original.apkg" not in archive.namelist():
+                raise ValueError("노트 유형 원본으로는 APKG 또는 Anki Helper 편집 프로젝트 ZIP을 선택해 주세요.")
+            temporary = tempfile.NamedTemporaryFile(prefix="anki-helper-note-type-source-", suffix=".apkg", delete=False)
+            temporary.write(archive.read("source/original.apkg")); temporary.close()
+    except zipfile.BadZipFile as exc:
+        raise ValueError("읽을 수 없는 노트 유형 원본 파일입니다.") from exc
+    package = read_apkg(temporary.name)
+    import_project(package, source)
+    return package, Path(temporary.name)
 
 
 def _get_note_type(note_type_id: str) -> NoteType:
@@ -207,6 +274,8 @@ def open_package(payload: OpenPackageRequest) -> dict:
     source = Path(payload.path)
     if not source.is_file():
         raise HTTPException(status_code=400, detail="선택한 파일을 찾을 수 없습니다.")
+    previous_package, previous_requires_save_as = _package, _requires_save_as
+    staged_source: Path | None = None
     try:
         if source.suffix.lower() == ".zip":
             with zipfile.ZipFile(source) as archive:
@@ -214,15 +283,124 @@ def open_package(payload: OpenPackageRequest) -> dict:
                     raise ApkgReadError("이 편집 프로젝트에는 원본 APKG가 포함되어 있지 않습니다. 새로 내보낸 편집 프로젝트를 사용해 주세요.")
                 temporary = tempfile.NamedTemporaryFile(prefix="anki-helper-project-", suffix=".apkg", delete=False)
                 temporary.write(archive.read("source/original.apkg")); temporary.close()
-            _package = read_apkg(temporary.name)
-            import_project(_package, source)
-            _requires_save_as = True
+                staged_source = Path(temporary.name)
+            package = read_apkg(staged_source)
+            import_project(package, source)
+            requires_save_as = True
         else:
-            _package = read_apkg(source)
-            _requires_save_as = False
+            package = read_apkg(source)
+            requires_save_as = False
     except (ApkgReadError, ValueError, zipfile.BadZipFile) as exc:
+        if staged_source:
+            staged_source.unlink(missing_ok=True)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _package = package
+    _requires_save_as = requires_save_as
+    _cleanup_ephemeral_package(previous_package, previous_requires_save_as)
     _selected_note_type_id = _package.note_types[0].id if _package.note_types else None
+    return _workspace_data() or {}
+
+
+@app.post("/api/tables/inspect")
+def inspect_table(payload: TableInspectRequest) -> dict:
+    source = Path(payload.path)
+    if not source.is_file():
+        raise HTTPException(status_code=400, detail="선택한 파일을 찾을 수 없습니다.")
+    try:
+        table = inspect_table_source(source, payload.sheet_name)
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "source_name": table.source_name,
+        "kind": table.kind,
+        "sheet_names": table.sheet_names,
+        "selected_sheet": table.selected_sheet,
+        "row_count": len(table.rows),
+        "column_count": max((len(row) for row in table.rows), default=0),
+        "omitted_empty_columns": table.omitted_empty_columns,
+        "sample_rows": table.rows[:10],
+    }
+
+
+@app.post("/api/note-types/source")
+def inspect_note_type_source(payload: NoteTypeSourceRequest) -> dict:
+    source = Path(payload.path)
+    if not source.is_file():
+        raise HTTPException(status_code=400, detail="선택한 파일을 찾을 수 없습니다.")
+    temporary: Path | None = None
+    try:
+        package, temporary = _read_note_type_source(source)
+        return {
+            "source_name": source.name,
+            "note_types": [
+                {"id": item.id, "name": item.name, "fields": [asdict(field) for field in item.fields], "template_count": len(item.templates)}
+                for item in package.note_types
+            ],
+        }
+    except (OSError, ValueError, zipfile.BadZipFile, ApkgReadError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        if temporary:
+            temporary.unlink(missing_ok=True)
+
+
+@app.post("/api/tables/create")
+def create_from_table(payload: TableCreateRequest) -> dict:
+    global _package, _selected_note_type_id, _requires_save_as
+    source = Path(payload.path)
+    if not source.is_file():
+        raise HTTPException(status_code=400, detail="선택한 파일을 찾을 수 없습니다.")
+    template_temporary: Path | None = None
+    previous_package, previous_requires_save_as = _package, _requires_save_as
+    try:
+        table = inspect_table_source(source, payload.sheet_name)
+        rows = table.rows[1:] if payload.first_row_is_header else table.rows
+        if payload.template_source_path and payload.template_note_type_id:
+            template_package, template_temporary = _read_note_type_source(payload.template_source_path)
+            template = next((item for item in template_package.note_types if item.id == payload.template_note_type_id), None)
+            if template is None:
+                raise ValueError("선택한 노트 유형을 원본 파일에서 찾지 못했습니다.")
+            try:
+                mapping = {int(source_order): int(destination_order) for source_order, destination_order in (payload.field_mapping or {}).items()}
+            except (TypeError, ValueError) as exc:
+                raise ValueError("필드 연결 정보가 올바르지 않습니다.") from exc
+            if not mapping:
+                raise ValueError("엑셀 열과 노트 유형 필드를 하나 이상 연결해 주세요.")
+            mapped_rows = []
+            for row in rows:
+                mapped = [""] * len(template.fields)
+                for source_order, destination_order in mapping.items():
+                    if 0 <= source_order < len(row) and 0 <= destination_order < len(mapped):
+                        mapped[destination_order] = row[source_order]
+                mapped_rows.append(mapped)
+            package = create_package_from_table(
+                [field.name for field in template.fields],
+                mapped_rows,
+                deck_name=payload.deck_name,
+                note_type_name=template.name,
+                front_field=0,
+                back_field=min(1, len(template.fields) - 1),
+                template=template,
+                template_package=template_package,
+            )
+        else:
+            package = create_package_from_table(
+                payload.field_names,
+                rows,
+                deck_name=payload.deck_name,
+                note_type_name=payload.note_type_name,
+                front_field=payload.front_field,
+                back_field=payload.back_field,
+            )
+    except (OSError, ValueError, sqlite3.DatabaseError, zipfile.BadZipFile, ApkgReadError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        if template_temporary:
+            template_temporary.unlink(missing_ok=True)
+    _package = package
+    _requires_save_as = True
+    _cleanup_ephemeral_package(previous_package, previous_requires_save_as)
+    _selected_note_type_id = _package.note_types[0].id
     return _workspace_data() or {}
 
 
@@ -237,12 +415,14 @@ def save_package(payload: SavePackageRequest) -> dict:
     if destination.suffix.lower() != ".apkg":
         raise HTTPException(status_code=400, detail="APKG 형식으로만 저장할 수 있습니다.")
     selected_name = next((item.name for item in _package.note_types if item.id == _selected_note_type_id), None)
+    previous_package, previous_requires_save_as = _package, _requires_save_as
     try:
-        target, backup = save_apkg(_package, destination, backup=True)
+        target, backup = save_apkg(_package, destination, backup=not _requires_save_as)
         _package = read_apkg(target)
         _requires_save_as = False
     except (OSError, sqlite3.DatabaseError, zipfile.BadZipFile, ApkgReadError, ValueError) as exc:
         raise HTTPException(status_code=500, detail=f"APKG 저장에 실패했습니다: {exc}") from exc
+    _cleanup_ephemeral_package(previous_package, previous_requires_save_as)
     if selected_name:
         _selected_note_type_id = next((item.id for item in _package.note_types if item.name == selected_name), _package.note_types[0].id if _package.note_types else None)
     return {"workspace": _workspace_data(), "saved_to": str(target), "backup": str(backup) if backup else None}
@@ -265,17 +445,23 @@ def download_media(stored_name: str) -> FileResponse:
     with zipfile.ZipFile(_package.source) as archive:
         temporary = tempfile.NamedTemporaryFile(prefix="anki-helper-media-", suffix=Path(item["name"]).suffix, delete=False)
         temporary.write(archive.read(stored_name)); temporary.close()
-    return FileResponse(temporary.name, filename=item["name"], media_type=mimetypes.guess_type(item["name"])[0] or "application/octet-stream")
+    return _temporary_file_response(
+        Path(temporary.name),
+        filename=item["name"],
+        media_type=mimetypes.guess_type(item["name"])[0] or "application/octet-stream",
+    )
 
 
 @app.post("/api/projects/import")
 def import_edit_project(payload: ImportProjectRequest) -> dict:
+    global _requires_save_as
     if _package is None:
         raise HTTPException(status_code=404, detail="먼저 APKG 파일을 열어주세요.")
     try:
         note_type = import_project(_package, payload.path)
     except (OSError, ValueError, zipfile.BadZipFile) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _requires_save_as = True
     return {"workspace": _workspace_data(), "note_type_id": note_type.id}
 
 
@@ -527,7 +713,7 @@ def download_export(note_type_id: str, kind: Literal["tsv", "design", "bundle", 
         if _package is None:  # Protected by _get_note_type; keep type check explicit.
             raise HTTPException(status_code=404, detail="패키지를 찾지 못했습니다.")
         save_apkg(deepcopy(_package), target, backup=False)
-    return FileResponse(target, filename=filename, media_type="application/octet-stream")
+    return _temporary_file_response(target, filename=filename, media_type="application/octet-stream")
 
 
 def main() -> None:

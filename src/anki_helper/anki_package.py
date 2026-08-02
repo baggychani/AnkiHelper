@@ -10,6 +10,7 @@ import sqlite3
 import tempfile
 import shutil
 import zlib
+import xml.etree.ElementTree as ET
 from copy import deepcopy
 from datetime import datetime
 import zipfile
@@ -56,10 +57,27 @@ class DeckPackage:
     database_name: str
     note_ids: dict[str, list[int]]
     removed_note_type_ids: list[str] = field(default_factory=list)
+    display_name: str | None = None
 
 
 class ApkgReadError(RuntimeError):
     pass
+
+
+@dataclass(slots=True)
+class TablePreview:
+    """A worksheet-shaped view of a structured source file.
+
+    The importer deliberately keeps this separate from Anki fields: a sheet's
+    first row is only a suggestion until the user confirms it in the UI.
+    """
+
+    source_name: str
+    kind: str
+    sheet_names: list[str]
+    selected_sheet: str
+    rows: list[list[str]]
+    omitted_empty_columns: int = 0
 
 
 def read_apkg(path: str | Path) -> DeckPackage:
@@ -782,36 +800,276 @@ def save_apkg(package: DeckPackage, destination: str | Path | None = None, *, ba
     """Persist edits into the real Anki collection and repack the APKG."""
     target = Path(destination) if destination else package.source
     backup_path = _backup_source(package.source) if backup else None
-    with zipfile.ZipFile(package.source) as source_archive:
-        database = source_archive.read(package.database_name)
-        if package.database_name.endswith(".anki21b"):
-            database = _decompress_anki21b(database)
-        with tempfile.NamedTemporaryFile(suffix=".anki2", delete=False) as temporary:
-            temporary.write(database)
-            database_path = Path(temporary.name)
-        try:
-            connection = sqlite3.connect(database_path)
-            try:
-                connection.create_collation("unicase", lambda left, right: (left.casefold() > right.casefold()) - (left.casefold() < right.casefold()))
-                normalized = bool(connection.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='notetypes'").fetchone())
-                (_write_normalized_changes if normalized else _write_legacy_changes)(connection, package)
-                connection.commit()
-            finally:
-                connection.close()
-            updated_database = database_path.read_bytes()
+    database_path: Path | None = None
+    temp_output: Path | None = None
+    try:
+        with zipfile.ZipFile(package.source) as source_archive:
+            database = source_archive.read(package.database_name)
             if package.database_name.endswith(".anki21b"):
-                updated_database = _compress_anki21b(updated_database)
-            temp_output = target.with_suffix(target.suffix + ".tmp")
-            with zipfile.ZipFile(temp_output, "w", zipfile.ZIP_DEFLATED) as output:
-                for item in source_archive.infolist():
-                    payload = updated_database if item.filename == package.database_name else source_archive.read(item.filename)
-                    output.writestr(item, payload)
-        finally:
-            database_path.unlink(missing_ok=True)
-    temp_output.replace(target)
+                database = _decompress_anki21b(database)
+            with tempfile.NamedTemporaryFile(suffix=".anki2", delete=False) as temporary:
+                temporary.write(database)
+                database_path = Path(temporary.name)
+            try:
+                connection = sqlite3.connect(database_path)
+                try:
+                    connection.create_collation("unicase", lambda left, right: (left.casefold() > right.casefold()) - (left.casefold() < right.casefold()))
+                    normalized = bool(connection.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='notetypes'").fetchone())
+                    (_write_normalized_changes if normalized else _write_legacy_changes)(connection, package)
+                    connection.commit()
+                finally:
+                    connection.close()
+                updated_database = database_path.read_bytes()
+                if package.database_name.endswith(".anki21b"):
+                    updated_database = _compress_anki21b(updated_database)
+                temp_output = target.with_suffix(target.suffix + ".tmp")
+                with zipfile.ZipFile(temp_output, "w", zipfile.ZIP_DEFLATED) as output:
+                    for item in source_archive.infolist():
+                        payload = updated_database if item.filename == package.database_name else source_archive.read(item.filename)
+                        output.writestr(item, payload)
+            finally:
+                if database_path:
+                    database_path.unlink(missing_ok=True)
+        if temp_output is None:
+            raise ApkgReadError("APKG 저장 임시 파일을 만들지 못했습니다.")
+        temp_output.replace(target)
+    except Exception:
+        if temp_output:
+            temp_output.unlink(missing_ok=True)
+        raise
     if target.resolve() == package.source.resolve():
         package.source = target
     return target, backup_path
+
+
+def inspect_table_source(path: str | Path, sheet_name: str | None = None) -> TablePreview:
+    """Load a tabular source without assigning meaning to its rows or columns."""
+    source = Path(path)
+    extension = source.suffix.casefold()
+    if extension == ".xlsx":
+        sheets = _read_xlsx(source)
+        if not sheets:
+            raise ValueError("엑셀 파일에서 읽을 수 있는 시트를 찾지 못했습니다.")
+        selected = sheet_name if sheet_name in sheets else next(iter(sheets))
+        rows, omitted = _drop_empty_columns(sheets[selected])
+        return TablePreview(source.name, "xlsx", list(sheets), selected, rows, omitted)
+    if extension not in {".csv", ".tsv", ".txt"}:
+        raise ValueError("Excel(.xlsx), CSV, TSV 또는 TXT 파일만 가져올 수 있습니다.")
+    encoding = "utf-8-sig"
+    try:
+        content = source.read_text(encoding=encoding)
+    except UnicodeDecodeError:
+        content = source.read_text(encoding="cp949")
+    delimiter = "\t" if extension == ".tsv" else _csv_delimiter(content)
+    rows = [[cell.strip() for cell in row] for row in csv.reader(io.StringIO(content), delimiter=delimiter)]
+    rows, omitted = _drop_empty_columns(_trim_table(rows))
+    return TablePreview(source.name, extension.lstrip("."), ["데이터"], "데이터", rows, omitted)
+
+
+def create_package_from_table(
+    fields: list[str],
+    rows: list[list[str]],
+    *,
+    deck_name: str,
+    note_type_name: str,
+    front_field: int,
+    back_field: int,
+    template: NoteType | None = None,
+    template_package: DeckPackage | None = None,
+) -> DeckPackage:
+    """Create a small, portable legacy APKG for a reviewed table.
+
+    The legacy collection schema remains importable by current Anki and is
+    intentionally used here because it is self-contained and does not need a
+    bundled Anki database as a hidden template.
+    """
+    clean_fields = [name.strip() for name in fields]
+    if not clean_fields or any(not name for name in clean_fields):
+        raise ValueError("모든 필드에 이름을 입력해 주세요.")
+    if len({name.casefold() for name in clean_fields}) != len(clean_fields):
+        raise ValueError("같은 이름의 필드는 사용할 수 없습니다.")
+    if not 0 <= front_field < len(clean_fields) or not 0 <= back_field < len(clean_fields):
+        raise ValueError("카드 앞면과 뒷면에 사용할 필드를 선택해 주세요.")
+    deck_name = deck_name.strip() or "새 덱"
+    note_type_name = note_type_name.strip() or "기본"
+    values = [
+        [str(row[index]).strip() if index < len(row) else "" for index in range(len(clean_fields))]
+        for row in rows
+    ]
+    values = [row for row in values if any(cell for cell in row)]
+    if not values:
+        raise ValueError("비어 있지 않은 데이터 행이 하나 이상 필요합니다.")
+
+    now = int(datetime.now().timestamp())
+    base_id = int(datetime.now().timestamp() * 1000) * 1000
+    model_id, deck_id = base_id + 1, base_id + 2
+    answer_fields = [name for index, name in enumerate(clean_fields) if index != front_field] or [clean_fields[back_field]]
+    answer_markup = "<br>\n".join("{{" + name + "}}" for name in answer_fields)
+    templates = (
+        [{"name": item.name, "ord": index, "qfmt": item.front, "afmt": item.back, "bqfmt": "", "bafmt": "", "did": None, "bfont": "", "bsize": 0} for index, item in enumerate(template.templates)]
+        if template and template.templates
+        else [{"name": "Card 1", "ord": 0, "qfmt": "{{" + clean_fields[front_field] + "}}", "afmt": "{{FrontSide}}\n\n<hr id=answer>\n\n" + answer_markup, "bqfmt": "", "bafmt": "", "did": None, "bfont": "", "bsize": 0}]
+    )
+    requirements = []
+    for index, card_template in enumerate(templates):
+        tokens = [match.strip() for match in FIELD_TOKEN.findall(card_template["qfmt"])]
+        order = next((index for index, name in enumerate(clean_fields) if name in tokens), front_field)
+        requirements.append([index, "any", [order]])
+    model = {
+        "id": model_id,
+        "name": template.name if template else note_type_name,
+        "type": 0,
+        "mod": now,
+        "usn": -1,
+        "sortf": front_field,
+        "did": None,
+        "tmpls": templates,
+        "flds": [
+            {"name": name, "ord": index, "sticky": False, "rtl": False, "font": "Arial", "size": 20}
+            for index, name in enumerate(clean_fields)
+        ],
+        "css": template.css if template else ".card {\n  font-family: arial;\n  font-size: 20px;\n  line-height: 1.5;\n  text-align: center;\n  color: black;\n  background-color: white;\n}\n",
+        "latexPre": "", "latexPost": "", "latexsvg": False,
+        "req": requirements,
+    }
+    deck = {"id": deck_id, "mod": now, "name": deck_name, "usn": -1, "lrnToday": [0, 0], "revToday": [0, 0], "newToday": [0, 0], "timeToday": [0, 0], "collapsed": False, "browserCollapsed": False, "desc": "", "dyn": 0, "conf": 1, "extendNew": 0, "extendRev": 0}
+    deck_conf = {"1": {"id": 1, "mod": now, "name": "Default", "usn": -1, "maxTaken": 60, "autoplay": True, "timer": 0, "replayq": True, "new": {"delays": [1, 10], "ints": [1, 4], "initialFactor": 2500, "perDay": 20}, "rev": {"ease4": 1.3, "ivlFct": 1, "maxIvl": 36500, "perDay": 200}, "lapse": {"delays": [10], "leechAction": 1, "leechFails": 8, "minInt": 1, "mult": 0}}}
+
+    temporary = tempfile.NamedTemporaryFile(prefix="anki-helper-new-deck-", suffix=".apkg", delete=False)
+    temporary.close()
+    database = Path(temporary.name).with_suffix(".anki2")
+    try:
+        connection = sqlite3.connect(database)
+        try:
+            connection.executescript(_LEGACY_SCHEMA)
+            connection.execute(
+                "INSERT INTO col VALUES (1, ?, ?, ?, 11, 0, -1, 0, ?, ?, ?, ?, '{}')",
+                (now, now * 1000, now * 1000, json.dumps({"curModel": model_id, "curDeck": deck_id, "newSpread": 0, "nextPos": len(values) + 1}), json.dumps({str(model_id): model}, ensure_ascii=False), json.dumps({str(deck_id): deck}, ensure_ascii=False), json.dumps(deck_conf, ensure_ascii=False)),
+            )
+            for index, row in enumerate(values):
+                note_id = base_id + 100 + index * 100
+                connection.execute(
+                    "INSERT INTO notes VALUES (?, ?, ?, ?, -1, '', ?, ?, ?, 0, '')",
+                    (note_id, uuid4().hex[:10], model_id, now, "\x1f".join(row), row[front_field], _note_checksum(row[front_field])),
+                )
+                for card_order in range(len(templates)):
+                    connection.execute(
+                        "INSERT INTO cards VALUES (?, ?, ?, ?, ?, -1, 0, 0, ?, 0, 2500, 0, 0, 0, 0, 0, 0, '')",
+                        (note_id + card_order + 1, note_id, deck_id, card_order, now, index * len(templates) + card_order + 1),
+                    )
+            connection.commit()
+        finally:
+            connection.close()
+        with zipfile.ZipFile(temporary.name, "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.write(database, "collection.anki2")
+            media = template_package.media if template_package else {}
+            archive.writestr("media", json.dumps(media, ensure_ascii=False))
+            if template_package and media:
+                with zipfile.ZipFile(template_package.source) as source_archive:
+                    for stored_name in media:
+                        if stored_name in template_package.archive_entries:
+                            archive.writestr(stored_name, source_archive.read(stored_name))
+    finally:
+        database.unlink(missing_ok=True)
+    package = read_apkg(temporary.name)
+    package.display_name = f"{deck_name}.apkg"
+    return package
+
+
+def _csv_delimiter(content: str) -> str:
+    try:
+        return csv.Sniffer().sniff(content[:8192], delimiters=",;\t").delimiter
+    except csv.Error:
+        return ","
+
+
+def _trim_table(rows: list[list[str]]) -> list[list[str]]:
+    while rows and not any(rows[-1]):
+        rows.pop()
+    width = max((len(row) for row in rows), default=0)
+    return [row + [""] * (width - len(row)) for row in rows]
+
+
+def _drop_empty_columns(rows: list[list[str]]) -> tuple[list[list[str]], int]:
+    """Ignore columns with no value anywhere; users can add them later in Fields."""
+    if not rows:
+        return rows, 0
+    active = [index for index in range(len(rows[0])) if any(row[index].strip() for row in rows)]
+    return [[row[index] for index in active] for row in rows], len(rows[0]) - len(active)
+
+
+def _read_xlsx(source: Path) -> dict[str, list[list[str]]]:
+    ns = {"main": "http://schemas.openxmlformats.org/spreadsheetml/2006/main", "rel": "http://schemas.openxmlformats.org/officeDocument/2006/relationships", "pkg": "http://schemas.openxmlformats.org/package/2006/relationships"}
+    try:
+        with zipfile.ZipFile(source) as archive:
+            workbook = ET.fromstring(archive.read("xl/workbook.xml"))
+            relationships = ET.fromstring(archive.read("xl/_rels/workbook.xml.rels"))
+            targets = {item.attrib["Id"]: item.attrib["Target"] for item in relationships.findall("pkg:Relationship", ns)}
+            shared: list[str] = []
+            if "xl/sharedStrings.xml" in archive.namelist():
+                strings = ET.fromstring(archive.read("xl/sharedStrings.xml"))
+                shared = ["".join(item.itertext()) for item in strings.findall("main:si", ns)]
+            output: dict[str, list[list[str]]] = {}
+            for sheet in workbook.findall("main:sheets/main:sheet", ns):
+                target = targets.get(sheet.attrib.get("{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id", ""))
+                if not target:
+                    continue
+                sheet_path = "xl/" + target.lstrip("/") if not target.startswith("xl/") else target
+                output[sheet.attrib.get("name", "시트")] = _read_xlsx_sheet(archive.read(sheet_path), shared, ns)
+            return output
+    except (KeyError, OSError, ET.ParseError, zipfile.BadZipFile) as exc:
+        raise ValueError("읽을 수 없는 Excel(.xlsx) 파일입니다.") from exc
+
+
+def _read_xlsx_sheet(payload: bytes, shared: list[str], ns: dict[str, str]) -> list[list[str]]:
+    root = ET.fromstring(payload)
+    rows: list[list[str]] = []
+    for row in root.findall("main:sheetData/main:row", ns):
+        values: list[str] = []
+        for cell in row.findall("main:c", ns):
+            reference = cell.attrib.get("r", "A1")
+            column = _xlsx_column_index(reference)
+            values.extend([""] * max(0, column - len(values)))
+            kind = cell.attrib.get("t")
+            value = cell.findtext("main:v", default="", namespaces=ns)
+            if kind == "s" and value.isdigit() and int(value) < len(shared):
+                values.append(shared[int(value)])
+            elif kind == "inlineStr":
+                inline = cell.find("main:is", ns)
+                values.append("".join(inline.itertext()) if inline is not None else "")
+            elif kind == "b":
+                values.append("TRUE" if value == "1" else "FALSE")
+            elif value:
+                values.append(value)
+            else:
+                formula = cell.findtext("main:f", default="", namespaces=ns)
+                values.append(f"={formula}" if formula else "")
+        rows.append(values)
+    return _trim_table(rows)
+
+
+def _xlsx_column_index(reference: str) -> int:
+    letters = "".join(char for char in reference if char.isalpha())
+    value = 0
+    for char in letters:
+        value = value * 26 + ord(char.upper()) - 64
+    return max(value - 1, 0)
+
+
+_LEGACY_SCHEMA = """
+CREATE TABLE col (id integer PRIMARY KEY, crt integer NOT NULL, mod integer NOT NULL, scm integer NOT NULL, ver integer NOT NULL, dty integer NOT NULL, usn integer NOT NULL, ls integer NOT NULL, conf text NOT NULL, models text NOT NULL, decks text NOT NULL, dconf text NOT NULL, tags text NOT NULL);
+CREATE TABLE notes (id integer PRIMARY KEY, guid text NOT NULL, mid integer NOT NULL, mod integer NOT NULL, usn integer NOT NULL, tags text NOT NULL, flds text NOT NULL, sfld integer NOT NULL, csum integer NOT NULL, flags integer NOT NULL, data text NOT NULL);
+CREATE TABLE cards (id integer PRIMARY KEY, nid integer NOT NULL, did integer NOT NULL, ord integer NOT NULL, mod integer NOT NULL, usn integer NOT NULL, type integer NOT NULL, queue integer NOT NULL, due integer NOT NULL, ivl integer NOT NULL, factor integer NOT NULL, reps integer NOT NULL, lapses integer NOT NULL, left integer NOT NULL, odue integer NOT NULL, odid integer NOT NULL, flags integer NOT NULL, data text NOT NULL);
+CREATE TABLE revlog (id integer PRIMARY KEY, cid integer NOT NULL, usn integer NOT NULL, ease integer NOT NULL, ivl integer NOT NULL, lastIvl integer NOT NULL, factor integer NOT NULL, time integer NOT NULL, type integer NOT NULL);
+CREATE TABLE graves (usn integer NOT NULL, oid integer NOT NULL, type integer NOT NULL);
+CREATE INDEX ix_notes_usn ON notes (usn);
+CREATE INDEX ix_notes_csum ON notes (csum);
+CREATE INDEX ix_cards_nid ON cards (nid);
+CREATE INDEX ix_cards_sched ON cards (did, queue, due);
+CREATE INDEX ix_cards_usn ON cards (usn);
+CREATE INDEX ix_revlog_usn ON revlog (usn);
+CREATE INDEX ix_revlog_cid ON revlog (cid);
+"""
 
 
 def render_template(template: str, fields: list[Field], values: list[str], front_html: str = "") -> str:

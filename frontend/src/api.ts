@@ -11,6 +11,20 @@ export type Workspace = {
   requires_save_as: boolean
 }
 
+export type TablePreview = {
+  source_name: string
+  kind: 'xlsx' | 'csv' | 'tsv' | 'txt'
+  sheet_names: string[]
+  selected_sheet: string
+  row_count: number
+  column_count: number
+  omitted_empty_columns: number
+  sample_rows: string[][]
+}
+
+export type SourceNoteType = { id: string; name: string; fields: Field[]; template_count: number }
+export type NoteTypeSource = { source_name: string; note_types: SourceNoteType[] }
+
 const base = import.meta.env.VITE_API_URL ?? 'http://127.0.0.1:8765'
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -33,6 +47,38 @@ export const api = {
       body: JSON.stringify({ note_type_id: noteTypeId }),
     }),
   open: (path: string) => request<Workspace>('/api/packages/open', { method: 'POST', body: JSON.stringify({ path }) }),
+  inspectTable: (path: string, sheetName?: string) =>
+    request<TablePreview>('/api/tables/inspect', { method: 'POST', body: JSON.stringify({ path, sheet_name: sheetName ?? null }) }),
+  inspectNoteTypeSource: (path: string) =>
+    request<NoteTypeSource>('/api/note-types/source', { method: 'POST', body: JSON.stringify({ path }) }),
+  createFromTable: (payload: {
+    path: string
+    sheetName?: string
+    firstRowIsHeader: boolean
+    fieldNames: string[]
+    deckName: string
+    noteTypeName: string
+    frontField: number
+    backField: number
+    templateSourcePath?: string
+    templateNoteTypeId?: string
+    fieldMapping?: Record<number, number>
+  }) => request<Workspace>('/api/tables/create', {
+    method: 'POST',
+    body: JSON.stringify({
+      path: payload.path,
+      sheet_name: payload.sheetName ?? null,
+      first_row_is_header: payload.firstRowIsHeader,
+      field_names: payload.fieldNames,
+      deck_name: payload.deckName,
+      note_type_name: payload.noteTypeName,
+      front_field: payload.frontField,
+      back_field: payload.backField,
+      template_source_path: payload.templateSourcePath ?? null,
+      template_note_type_id: payload.templateNoteTypeId ?? null,
+      field_mapping: payload.fieldMapping ? Object.fromEntries(Object.entries(payload.fieldMapping).map(([source, destination]) => [String(source), destination])) : null,
+    }),
+  }),
   updateTemplate: (noteTypeId: string, index: number, patch: Partial<Template>) =>
     request<Workspace>(`/api/note-types/${noteTypeId}/templates/${index}`, { method: 'PATCH', body: JSON.stringify(patch) }),
   updateCss: (noteTypeId: string, css: string) =>

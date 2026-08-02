@@ -290,6 +290,16 @@ fn show_startup_error(message: &str) {
     eprintln!("{message}");
 }
 
+#[tauri::command]
+fn show_main_window(window: WebviewWindow) -> Result<(), String> {
+    if should_start_maximized(&window) {
+        let _ = window.maximize();
+    }
+    window.show().map_err(|error| error.to_string())?;
+    let _ = window.set_focus();
+    Ok(())
+}
+
 fn main() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -306,14 +316,9 @@ fn main() {
                 }
             }
 
-            if let Some(window) = app.get_webview_window("main") {
-                if should_start_maximized(&window) {
-                    let _ = window.maximize();
-                }
-                let _ = window.show();
-            }
             Ok(())
         })
+        .invoke_handler(tauri::generate_handler![show_main_window])
         .build(tauri::generate_context!())
         .expect("error while running Anki Helper");
 

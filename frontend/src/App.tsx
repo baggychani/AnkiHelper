@@ -1,18 +1,20 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { open, save } from '@tauri-apps/plugin-dialog'
 import { writeFile } from '@tauri-apps/plugin-fs'
+import { invoke } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import {
   ArrowLeft, ArrowRight, ArrowRightLeft, BookOpen, Braces, Check, ChevronDown, ChevronRight, ChevronUp, Code2, Copy,
   Database, Download, FileArchive, FolderOpen, Grid2X2, HardDrive,
-  Image, Layers3, ListChecks, LoaderCircle, LogOut, Music2, Palette, PanelLeft,
+  FileSpreadsheet, Image, Layers3, ListChecks, LoaderCircle, LogOut, Music2, Palette, PanelLeft,
   Play, Plus, Save, Sparkles, Table2, Trash2, Type, X,
 } from 'lucide-react'
-import { api, type Field, type MediaItem, type NoteType, type Workspace } from './api'
+import { api, type Field, type MediaItem, type NoteType, type SourceNoteType, type TablePreview, type Workspace } from './api'
 
 type Page = 'overview' | 'data' | 'fields' | 'media' | 'design' | 'preview'
 type EditorMode = 'front' | 'back' | 'css'
 type ExportKind = 'tsv' | 'design' | 'bundle' | 'media' | 'project'
+type PendingWork = { kind: 'open-picker' | 'table-picker' | 'open-path'; path?: string }
 
 const navItems = [
   ['overview', '개요', Grid2X2], ['data', '카드 데이터', Table2],
@@ -36,7 +38,19 @@ function App() {
   const [error, setError] = useState('')
   const [exitPrompt, setExitPrompt] = useState(false)
   const [dragActive, setDragActive] = useState(false)
+  const [tableImport, setTableImport] = useState<{ path: string; preview: TablePreview } | null>(null)
+  const [pendingWork, setPendingWork] = useState<PendingWork | null>(null)
+  const [newWorkMenuOpen, setNewWorkMenuOpen] = useState(false)
   const allowCloseRef = useRef(false)
+  const newWorkMenuRef = useRef<HTMLDivElement | null>(null)
+
+  useEffect(() => {
+    if (!('__TAURI_INTERNALS__' in window)) return
+    const firstFrame = window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => { void invoke('show_main_window').catch(() => undefined) })
+    })
+    return () => window.cancelAnimationFrame(firstFrame)
+  }, [])
 
   const selected = useMemo(() => workspace?.note_types.find((item) => item.id === selectedId) ?? workspace?.note_types[0], [workspace, selectedId])
   const notify = useCallback((message: string) => {
@@ -63,16 +77,21 @@ function App() {
   useEffect(() => { api.status().then((saved) => saved && hydrate(saved)).catch(() => undefined) }, [hydrate])
 
   useEffect(() => {
+    if (!('__TAURI_INTERNALS__' in window)) return
     let disposed = false
     let unlisten: (() => void) | undefined
-    void getCurrentWindow().onCloseRequested((event) => {
-      if (allowCloseRef.current) return
-      event.preventDefault()
-      setExitPrompt(true)
-    }).then((stop) => {
-      if (disposed) stop()
-      else unlisten = stop
-    }).catch(() => undefined)
+    try {
+      void getCurrentWindow().onCloseRequested((event) => {
+        if (allowCloseRef.current) return
+        event.preventDefault()
+        setExitPrompt(true)
+      }).then((stop) => {
+        if (disposed) stop()
+        else unlisten = stop
+      }).catch(() => undefined)
+    } catch {
+      // The browser preview does not expose Tauri's window bridge.
+    }
     return () => {
       disposed = true
       unlisten?.()
@@ -90,6 +109,19 @@ function App() {
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [exitPrompt])
+
+  useEffect(() => {
+    if (!newWorkMenuOpen) return
+    const closeMenu = (event: MouseEvent) => {
+      if (!newWorkMenuRef.current?.contains(event.target as Node)) setNewWorkMenuOpen(false)
+    }
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') { event.preventDefault(); setNewWorkMenuOpen(false) }
+    }
+    window.addEventListener('mousedown', closeMenu)
+    window.addEventListener('keydown', onKey)
+    return () => { window.removeEventListener('mousedown', closeMenu); window.removeEventListener('keydown', onKey) }
+  }, [newWorkMenuOpen])
 
   const confirmExit = async () => {
     allowCloseRef.current = true
@@ -118,20 +150,21 @@ function App() {
     return () => window.clearTimeout(timer)
   }, [selected, templateIndex, side, noteIndex, workspace])
 
-  const persist = async () => {
-    if (!workspace) return
+  const persist = async (): Promise<boolean> => {
+    if (!workspace) return false
     setBusy(true); setError('')
     try {
       let destination: string | undefined
       if (workspace.requires_save_as) {
         const chosen = await save({ defaultPath: `${selected?.name ?? 'Anki'}_수정본.apkg`, filters: [{ name: 'Anki 패키지', extensions: ['apkg'] }] })
-        if (!chosen) return
+        if (!chosen) return false
         destination = chosen
       }
       const result = await api.savePackage(destination)
       hydrate(result.workspace); setDirty(false)
       notify(`저장했습니다 · 백업: ${result.backup ?? '생성 안 됨'}`)
-    } catch (caught) { setError(caught instanceof Error ? caught.message : '저장하지 못했습니다.') }
+      return true
+    } catch (caught) { setError(caught instanceof Error ? caught.message : '저장하지 못했습니다.'); return false }
     finally { setBusy(false) }
   }
 
@@ -187,20 +220,55 @@ function App() {
   }
 
   const openPackagePath = useCallback(async (path: string) => {
-    if (dirty && !window.confirm('저장하지 않은 변경이 있습니다. 저장하지 않고 다른 파일을 열까요?')) return
     setBusy(true); setError('')
     try { hydrate(await api.open(path)); setDirty(false); setPage('overview') }
     catch (caught) { setError(caught instanceof Error ? caught.message : 'APKG를 열지 못했습니다.') }
     finally { setBusy(false) }
-  }, [dirty, hydrate])
+  }, [hydrate])
 
-  const choosePackage = async () => {
+  const choosePackageNow = async () => {
     const path = await open({ multiple: false, filters: [{ name: 'APKG 또는 편집 프로젝트', extensions: ['apkg', 'zip'] }] })
     if (typeof path !== 'string') return
     await openPackagePath(path)
   }
 
+  const beginTableImport = useCallback(async (sourcePath?: string) => {
+    const path = sourcePath ?? await open({ multiple: false, filters: [{ name: '엑셀 및 표 데이터', extensions: ['xlsx', 'csv', 'tsv', 'txt'] }] })
+    if (typeof path !== 'string') return
+    setBusy(true); setError('')
+    try {
+      setTableImport({ path, preview: await api.inspectTable(path) })
+    } catch (caught) { setError(caught instanceof Error ? caught.message : '표 데이터를 읽지 못했습니다.') }
+    finally { setBusy(false) }
+  }, [])
+
+  const requestWork = useCallback((work: PendingWork) => {
+    if (dirty) { setPendingWork(work); return }
+    if (work.kind === 'open-path' && work.path) void openPackagePath(work.path)
+    else if (work.kind === 'open-picker') void choosePackageNow()
+    else void beginTableImport(work.path)
+  }, [beginTableImport, dirty, openPackagePath])
+
+  const choosePackage = useCallback(() => requestWork({ kind: 'open-picker' }), [requestWork])
+  const requestTableImport = useCallback(() => requestWork({ kind: 'table-picker' }), [requestWork])
+  const continuePendingWork = async (saveFirst: boolean) => {
+    const work = pendingWork
+    if (!work) return
+    if (saveFirst && !(await persist())) return
+    setPendingWork(null)
+    if (work.kind === 'open-path' && work.path) await openPackagePath(work.path)
+    else if (work.kind === 'open-picker') await choosePackageNow()
+    else await beginTableImport(work.path)
+  }
+
   useEffect(() => {
+    const start = () => { requestTableImport() }
+    window.addEventListener('ankihelper:import-table', start)
+    return () => window.removeEventListener('ankihelper:import-table', start)
+  }, [requestTableImport])
+
+  useEffect(() => {
+    if (!('__TAURI_INTERNALS__' in window)) return
     let disposed = false
     let unlisten: (() => void) | undefined
     void getCurrentWindow().onDragDropEvent((event) => {
@@ -213,8 +281,11 @@ function App() {
         return
       }
       setDragActive(false)
-      const path = event.payload.paths.find((item) => /\.(apkg|zip)$/i.test(item)) ?? event.payload.paths[0]
-      if (path) void openPackagePath(path)
+      const path = event.payload.paths.find((item) => /\.(apkg|zip|xlsx|csv|tsv|txt)$/i.test(item)) ?? event.payload.paths[0]
+      if (path) {
+        if (/\.(xlsx|csv|tsv|txt)$/i.test(path)) requestWork({ kind: 'table-picker', path })
+        else requestWork({ kind: 'open-path', path })
+      }
     }).then((stop) => {
       if (disposed) stop()
       else unlisten = stop
@@ -223,7 +294,7 @@ function App() {
       disposed = true
       unlisten?.()
     }
-  }, [openPackagePath])
+  }, [requestWork])
 
   const updateCell = async (row: number, fieldOrder: number, value: string) => {
     if (!selected) return
@@ -249,7 +320,7 @@ function App() {
             <SideAction label="입력 TSV" icon={Download} compact={!sidebarOpen} disabled={!selected} onClick={() => exportFile('tsv')} />
             <SideAction label="디자인 JSON" icon={Code2} compact={!sidebarOpen} disabled={!selected} onClick={() => exportFile('design')} />
             <SideAction label="다른 이름으로 APKG 저장" icon={HardDrive} compact={!sidebarOpen} disabled={!selected} onClick={() => exportFile('bundle')} />
-            {sidebarOpen && <div className="sidebar-version mx-2 mt-4 border-t border-white/[.07] pt-3 text-[10px] leading-5 text-slate-600"><p>v1.1.4</p><p>© 2026 Bae Gichan</p></div>}
+            {sidebarOpen && <div className="sidebar-version mx-2 mt-4 border-t border-white/[.07] pt-3 text-[10px] leading-5 text-slate-600"><p>v1.2.0</p><p>© 2026 Bae Gichan</p></div>}
           </div>
         </div>
       </aside>
@@ -272,15 +343,17 @@ function App() {
               <h1 className="truncate text-lg font-semibold tracking-tight lg:text-xl">안녕하세요, 반갑습니다!</h1>
             )}
           </div>
-          <div className="flex shrink-0 items-center gap-2">{workspace && <button onClick={persist} disabled={busy || !dirty} className={`inline-flex h-9 items-center gap-2 rounded-xl px-3 text-xs font-semibold transition lg:h-10 lg:px-4 ${dirty ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-500/20' : 'border border-slate-200 bg-white text-slate-400'}`}>{busy ? <LoaderCircle className="animate-spin" size={16} /> : <Save size={16} />}{dirty ? '저장' : '저장됨'}<span className="hidden text-[10px] opacity-65 lg:inline">Ctrl+S</span></button>}<button onClick={choosePackage} disabled={busy} className="inline-flex h-9 items-center gap-2 rounded-xl bg-[#11182a] px-3 text-xs font-semibold text-white lg:h-10 lg:px-4"><FolderOpen size={16} /><span className="hidden sm:inline">파일 열기</span></button></div>
+          <div className="flex shrink-0 items-center gap-2">{workspace && <><button onClick={persist} disabled={busy || !dirty} className={`inline-flex h-9 items-center gap-2 rounded-xl px-3 text-xs font-semibold transition lg:h-10 lg:px-4 ${dirty ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-500/20' : 'border border-slate-200 bg-white text-slate-400'}`}>{busy ? <LoaderCircle className="animate-spin" size={16} /> : <Save size={16} />}{dirty ? '저장' : '저장됨'}<span className="hidden text-[10px] opacity-65 lg:inline">Ctrl+S</span></button><div ref={newWorkMenuRef} className="relative"><button onClick={() => setNewWorkMenuOpen((open) => !open)} disabled={busy} className="inline-flex h-9 items-center gap-2 rounded-xl bg-[#11182a] px-3 text-xs font-semibold text-white transition hover:bg-[#202b45] lg:h-10 lg:px-4"><Plus size={16} /><span>새 작업</span><ChevronDown size={14} className={`transition ${newWorkMenuOpen ? 'rotate-180' : ''}`} /></button>{newWorkMenuOpen && <div className="absolute right-0 top-[calc(100%+8px)] z-[75] w-64 overflow-hidden rounded-2xl border border-slate-200 bg-white p-1.5 shadow-xl"><button onClick={() => { setNewWorkMenuOpen(false); requestTableImport() }} className="flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left transition hover:bg-indigo-50"><span className="grid h-9 w-9 place-items-center rounded-lg bg-indigo-100 text-indigo-600"><FileSpreadsheet size={17} /></span><span><b className="block text-sm text-slate-800">표 데이터에서 새 덱 만들기</b><small className="block pt-0.5 text-xs text-slate-500">Excel · CSV · TSV · TXT</small></span></button><button onClick={() => { setNewWorkMenuOpen(false); choosePackage() }} className="flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left transition hover:bg-slate-50"><span className="grid h-9 w-9 place-items-center rounded-lg bg-slate-100 text-slate-600"><FolderOpen size={17} /></span><span><b className="block text-sm text-slate-800">기존 파일 불러오기</b><small className="block pt-0.5 text-xs text-slate-500">APKG · 편집 프로젝트</small></span></button></div>}</div></>}</div>
         </header>
         <div className={`min-h-0 flex-1 px-3 pb-4 ${!workspace || page === 'design' || page === 'media' ? 'overflow-hidden' : 'overflow-y-auto'}`}>{!workspace ? <Welcome onOpen={choosePackage} busy={busy} dragActive={dragActive} /> : page === 'overview' ? <Overview workspace={workspace} selected={selected} onPage={setPage} onSelect={(id) => { void selectNoteType(id) }} onDeleteNoteType={(id) => mutate(() => api.deleteNoteType(id), '빈 노트 유형을 제거했습니다. 저장하면 APKG에 반영됩니다.')} onMoveNotes={async (fromId, toId, mapping) => { try { const result = await api.moveNotes(fromId, toId, mapping); hydrate(result.workspace); setDirty(true); notify(`${result.moved.toLocaleString()}개 카드를 옮겼습니다.`); } catch (caught) { setError(caught instanceof Error ? caught.message : '카드를 옮기지 못했습니다.'); throw caught } }} /> : page === 'data' ? <DataPage noteType={selected} onUpdate={updateCell} /> : page === 'fields' ? <FieldsPage noteType={selected} onRename={async (order, name) => { await mutate(() => api.updateField(selected!.id, order, name)) }} onAdd={async (name) => { await mutate(() => api.addField(selected!.id, name)) }} onDelete={async (order) => { await mutate(() => api.deleteField(selected!.id, order)) }} onReorder={async (order, newOrder) => { await mutate(() => api.reorderField(selected!.id, order, newOrder)) }} onMove={async (order, destination, mode) => { const result = await api.moveFieldContents(selected!.id, order, destination, mode); hydrate(result.workspace); setDirty(true); notify(`${result.changed.toLocaleString()}개 노트에서 내용을 이동했습니다.`); return result.changed }} onClone={async (name) => { await mutate(async () => { const next = await api.cloneNoteType(selected!.id, name, true); setPage('overview'); return next }, '카드를 새 노트 유형으로 옮겼습니다. 저장하면 APKG에 반영됩니다.') }} /> : page === 'media' ? <MediaPage onExport={() => exportFile('media')} /> : page === 'design' ? <DesignPage noteType={selected} index={templateIndex} setIndex={setTemplateIndex} onSave={async (mode, value) => { await mutate(() => mode === 'css' ? api.updateCss(selected!.id, value) : api.updateTemplate(selected!.id, templateIndex, { [mode]: value }), '카드 디자인을 적용했습니다.') }} notify={notify} /> : <PreviewPage noteType={selected} side={side} setSide={setSide} noteIndex={noteIndex} setNoteIndex={setNoteIndex} previewHtml={previewHtml} />}</div>
       </section>
     </div>
     {toast && <div className={`fixed bottom-7 left-1/2 z-[70] -translate-x-1/2 rounded-xl bg-[#0b1426] px-5 py-3 text-sm font-semibold text-white shadow-2xl ring-1 ring-white/10 transition-opacity duration-300 ${toastVisible ? 'opacity-100' : 'opacity-0'}`}><span className="mr-2 text-emerald-400">✓</span>{toast}</div>}
     {error && <Modal title="작업을 완료하지 못했습니다" description={error} tone="danger" confirmLabel="확인" onConfirm={() => setError('')} />}
+    {pendingWork && <UnsavedWorkModal onCancel={() => setPendingWork(null)} onSave={() => void continuePendingWork(true)} onDiscard={() => void continuePendingWork(false)} />}
+    {tableImport && <SpreadsheetImportWizard path={tableImport.path} initial={tableImport.preview} onCancel={() => setTableImport(null)} onSheetChange={(sheet) => api.inspectTable(tableImport.path, sheet)} onCreate={async (payload) => { setBusy(true); setError(''); try { hydrate(await api.createFromTable({ path: tableImport.path, ...payload })); setDirty(true); setPage('overview'); setTableImport(null); notify('새 덱 초안을 만들었습니다. 저장 위치를 선택해 주세요.'); } catch (caught) { setError(caught instanceof Error ? caught.message : '새 덱을 만들지 못했습니다.'); } finally { setBusy(false); } }} />}
     {exitPrompt && (
-      <div className="fixed inset-0 z-[90] grid place-items-center bg-slate-950/45 p-4 backdrop-blur-sm" onClick={() => setExitPrompt(false)}>
+      <div className="fixed inset-0 z-[200] grid place-items-center bg-slate-950/45 p-4 backdrop-blur-sm" onClick={() => setExitPrompt(false)}>
         <div role="dialog" aria-modal="true" aria-labelledby="exit-title" className="w-full max-w-md rounded-[22px] border border-white/70 bg-white p-6 shadow-2xl" onClick={(event) => event.stopPropagation()}>
           <div className="mb-4 grid h-11 w-11 place-items-center rounded-xl bg-[#151d31] text-white"><LogOut size={20} /></div>
           <h3 id="exit-title" className="text-lg font-semibold">Anki Helper를 종료할까요?</h3>
@@ -289,7 +362,6 @@ function App() {
               ? '저장하지 않은 변경이 있습니다. 종료하면 이 작업 내용은 사라집니다.'
               : '창을 닫으면 프로그램이 종료됩니다.'}
           </p>
-          <p className="mt-3 text-xs text-slate-400">Esc로 취소할 수 있습니다.</p>
           <div className="mt-6 flex justify-end gap-2">
             <button onClick={() => setExitPrompt(false)} className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-semibold text-slate-600">취소</button>
             <button onClick={() => void confirmExit()} className="rounded-xl bg-[#151d31] px-4 py-2.5 text-sm font-semibold text-white">종료</button>
@@ -300,9 +372,146 @@ function App() {
   </main>
 }
 
+function SpreadsheetImportWizard({ path, initial, onCancel, onSheetChange, onCreate }: {
+  path: string
+  initial: TablePreview
+  onCancel: () => void
+  onSheetChange: (sheet: string) => Promise<TablePreview>
+  onCreate: (payload: { sheetName?: string; firstRowIsHeader: boolean; fieldNames: string[]; deckName: string; noteTypeName: string; frontField: number; backField: number; templateSourcePath?: string; templateNoteTypeId?: string; fieldMapping?: Record<number, number> }) => Promise<void>
+}) {
+  const [preview, setPreview] = useState(initial)
+  const [firstRowIsHeader, setFirstRowIsHeader] = useState(false)
+  const [fieldNames, setFieldNames] = useState(() => initial.sample_rows[0]?.map((_, index) => `필드 ${index + 1}`) ?? [])
+  const [deckName, setDeckName] = useState(() => initial.source_name.replace(/\.[^.]+$/, ''))
+  const [noteTypeName, setNoteTypeName] = useState('기본')
+  const [frontField, setFrontField] = useState(0)
+  const [backField, setBackField] = useState(() => Math.min(1, Math.max(initial.column_count - 1, 0)))
+  const [switchingSheet, setSwitchingSheet] = useState(false)
+  const [templateSourcePath, setTemplateSourcePath] = useState('')
+  const [templateTypes, setTemplateTypes] = useState<SourceNoteType[]>([])
+  const [templateTypeId, setTemplateTypeId] = useState('')
+  const [templateMapping, setTemplateMapping] = useState<Record<number, number>>({})
+  const [activeColumn, setActiveColumn] = useState<number | null>(null)
+  const [loadingTemplate, setLoadingTemplate] = useState(false)
+  const [mappingOpen, setMappingOpen] = useState(false)
+  const [mappingBeforeOpen, setMappingBeforeOpen] = useState<Record<number, number>>({})
+  const columns = Array.from({ length: preview.column_count }, (_, index) => index)
+  const templateType = templateTypes.find((item) => item.id === templateTypeId)
+  const shownRows = preview.sample_rows.slice(firstRowIsHeader ? 1 : 0)
+  const invalidNames = fieldNames.length !== preview.column_count || fieldNames.some((name) => !name.trim()) || new Set(fieldNames.map((name) => name.trim().toLowerCase())).size !== fieldNames.length
+  const changeSheet = async (sheet: string) => {
+    if (sheet === preview.selected_sheet) return
+    setSwitchingSheet(true)
+    try {
+      const next = await onSheetChange(sheet)
+      setPreview(next)
+      setFirstRowIsHeader(false)
+      setFieldNames(Array.from({ length: next.column_count }, (_, index) => `필드 ${index + 1}`))
+      setFrontField(0)
+      setBackField(Math.min(1, Math.max(next.column_count - 1, 0)))
+    } finally { setSwitchingSheet(false) }
+  }
+  const setHeaderMode = (next: boolean) => {
+    setFirstRowIsHeader(next)
+    if (next) setFieldNames(columns.map((index) => preview.sample_rows[0]?.[index]?.trim() || `필드 ${index + 1}`))
+    else setFieldNames(columns.map((index) => `필드 ${index + 1}`))
+  }
+  const autoMap = (type: SourceNoteType) => {
+    const next: Record<number, number> = {}
+    for (const column of columns) {
+      const target = type.fields.find((field) => field.name.trim().toLowerCase() === (fieldNames[column] ?? '').trim().toLowerCase())
+      if (target) next[column] = target.order
+    }
+    setTemplateMapping(next)
+    setActiveColumn(null)
+  }
+  const chooseTemplateSource = async () => {
+    const selected = await open({ multiple: false, filters: [{ name: 'Anki 패키지 또는 편집 프로젝트', extensions: ['apkg', 'zip'] }] })
+    if (typeof selected !== 'string') return
+    setLoadingTemplate(true)
+    try {
+      const result = await api.inspectNoteTypeSource(selected)
+      setTemplateSourcePath(selected)
+      setTemplateTypes(result.note_types)
+      const first = result.note_types[0]
+      setTemplateTypeId(first?.id ?? '')
+      if (first) autoMap(first)
+    } finally { setLoadingTemplate(false) }
+  }
+  const connectTemplateField = (destination: number) => {
+    if (activeColumn === null) return
+    setTemplateMapping((current) => {
+      const next = { ...current }
+      for (const [source, target] of Object.entries(next)) if (target === destination) delete next[Number(source)]
+      next[activeColumn] = destination
+      return next
+    })
+    setActiveColumn(null)
+  }
+  const applyTemplateMapping = () => {
+    if (!templateType) return
+    setFieldNames((names) => names.map((name, source) => {
+      const destination = templateMapping[source]
+      return destination === undefined ? name : templateType.fields[destination]?.name ?? name
+    }))
+    setMappingOpen(false)
+  }
+  useEffect(() => {
+    if (mappingOpen) return
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') { event.preventDefault(); onCancel() }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [mappingOpen, onCancel])
+  return <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/45 p-3 backdrop-blur-sm sm:p-6">
+    <div role="dialog" aria-modal="true" aria-label="Excel에서 새 덱 만들기" className="flex max-h-[calc(100vh-24px)] w-full max-w-6xl flex-col overflow-hidden rounded-[24px] border border-white/70 bg-[#f7f8fc] shadow-2xl sm:max-h-[calc(100vh-48px)] sm:rounded-[28px]">
+      <div className="flex shrink-0 items-start justify-between border-b border-slate-200/80 bg-white px-5 py-5 sm:px-7">
+        <div><div className="mb-2 flex items-center gap-2 text-xs font-bold tracking-[.12em] text-indigo-500"><FileSpreadsheet size={15} /> STRUCTURED DATA</div><h2 className="text-xl font-semibold tracking-tight text-slate-900">엑셀에서 새 Anki 덱 만들기</h2></div>
+        <button onClick={onCancel} className="grid h-9 w-9 place-items-center rounded-xl text-slate-400 transition hover:bg-slate-100 hover:text-slate-700" aria-label="가져오기 취소"><X size={19} /></button>
+      </div>
+      <div className="grid min-h-0 flex-1 overflow-y-auto lg:grid-cols-[minmax(0,1.3fr)_minmax(340px,.7fr)]">
+        <section className="min-w-0 border-b border-slate-200/80 p-5 lg:border-b-0 lg:border-r lg:p-7">
+          <div className="mb-4 flex flex-wrap items-start justify-between gap-x-6 gap-y-3"><div className="flex min-w-0 flex-1 flex-wrap items-start gap-x-6 gap-y-3"><div className="min-w-0"><p className="text-sm font-semibold text-slate-800">원본 데이터</p><p title={preview.source_name} className="mt-0.5 max-w-[360px] truncate text-xs text-slate-500">{preview.source_name} · {preview.row_count.toLocaleString()}행 · {preview.column_count}열</p></div>{templateType && <div className="min-w-[235px] border-l border-slate-200 pl-5"><p className="text-sm font-semibold text-slate-800">불러온 노트 유형</p><p className="mt-0.5 text-xs text-slate-500">{templateType.name} · {templateType.fields.length}개 필드 · 카드 {templateType.template_count}개</p>{templateTypes.length > 1 && <select value={templateTypeId} onChange={(event) => { const next = templateTypes.find((item) => item.id === event.target.value); setTemplateTypeId(event.target.value); if (next) autoMap(next) }} className="mt-2 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-700 outline-none focus:border-indigo-400">{templateTypes.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select>}</div>}</div>{preview.sheet_names.length > 1 && <label className="shrink-0 text-xs font-semibold text-slate-500">시트 <select value={preview.selected_sheet} disabled={switchingSheet} onChange={(event) => void changeSheet(event.target.value)} className="ml-2 rounded-lg border border-slate-200 bg-white px-2.5 py-2 text-sm font-medium text-slate-700 outline-none focus:border-indigo-400">{preview.sheet_names.map((sheet) => <option key={sheet}>{sheet}</option>)}</select></label>}</div>
+          <label className="mb-4 flex cursor-pointer items-center gap-3 rounded-xl border border-indigo-100 bg-indigo-50/70 px-4 py-3 text-sm text-slate-700 transition hover:border-indigo-200"><input type="checkbox" checked={firstRowIsHeader} onChange={(event) => setHeaderMode(event.target.checked)} className="h-4 w-4 accent-indigo-600" /><span><b className="font-semibold">첫 행을 필드명 후보로 사용</b><span className="ml-1.5 text-slate-500">아래에서 언제든 직접 수정할 수 있습니다.</span></span></label>
+          <div className="overflow-hidden rounded-xl border border-slate-200 bg-white"><div className="overflow-x-auto"><table className="min-w-full border-collapse text-left text-xs"><thead className="bg-slate-50 text-slate-400"><tr>{columns.map((index) => <th key={index} className="min-w-[120px] border-b border-slate-200 px-3 py-2.5 font-semibold">열 {String.fromCharCode(65 + index)}</th>)}</tr></thead><tbody>{shownRows.length ? shownRows.slice(0, 7).map((row, rowIndex) => <tr key={rowIndex} className="border-b border-slate-100 last:border-0">{columns.map((column) => <td key={column} className="max-w-[210px] truncate px-3 py-2.5 text-slate-600" title={row[column] ?? ''}>{row[column] || <span className="text-slate-300">—</span>}</td>)}</tr>) : <tr><td colSpan={Math.max(columns.length, 1)} className="px-4 py-8 text-center text-slate-400">표시할 데이터 행이 없습니다.</td></tr>}</tbody></table></div></div>
+          <p className="mt-3 text-xs leading-5 text-slate-400">미리보기는 처음 10행만 표시합니다. 빈 행은 새 덱을 만들 때 제외됩니다.{preview.omitted_empty_columns > 0 && ` 완전히 빈 열 ${preview.omitted_empty_columns}개는 건너뛰며, 필요하면 가져온 뒤 필드 관리에서 추가할 수 있습니다.`}</p>
+        </section>
+        <section className="p-5 lg:p-7">
+          <div className="mb-5 flex items-center gap-2"><span className="grid h-7 w-7 place-items-center rounded-lg bg-indigo-600 text-xs font-bold text-white">1</span><h3 className="font-semibold text-slate-800">덱과 필드 확인</h3></div>
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-1 xl:grid-cols-2"><label className="text-xs font-semibold text-slate-500">덱 이름<input value={deckName} onChange={(event) => setDeckName(event.target.value)} className="mt-1.5 w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm font-medium text-slate-800 outline-none transition focus:border-indigo-400 focus:ring-4 focus:ring-indigo-100" /></label>{!templateType && <label className="text-xs font-semibold text-slate-500">새 노트 유형 이름<input value={noteTypeName} onChange={(event) => setNoteTypeName(event.target.value)} className="mt-1.5 w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm font-medium text-slate-800 outline-none transition focus:border-indigo-400 focus:ring-4 focus:ring-indigo-100" /></label>}</div>
+          <div className="mt-4 rounded-xl border border-slate-200 bg-white p-3">{templateType ? <button type="button" onClick={() => { setMappingBeforeOpen(templateMapping); setMappingOpen(true) }} className="flex w-full items-center justify-between text-left"><span><b className="block text-sm text-slate-800">엑셀 열 연결</b><small className="mt-0.5 block text-xs text-slate-500">{Object.keys(templateMapping).length}개 필드 연결됨</small></span><ArrowRightLeft size={18} className="text-indigo-500" /></button> : <div className="flex items-center justify-between gap-3"><div><p className="text-sm font-semibold text-slate-800">기존 노트 유형 사용 <span className="font-normal text-slate-400">(선택)</span></p></div><button type="button" onClick={() => void chooseTemplateSource()} disabled={loadingTemplate} className="shrink-0 rounded-lg border border-indigo-200 px-3 py-2 text-xs font-semibold text-indigo-700 transition hover:bg-indigo-50 disabled:opacity-50">{loadingTemplate ? '불러오는 중…' : '노트 유형 불러오기'}</button></div>}</div>
+          <div className="mt-5"><p className="mb-2 text-xs font-semibold text-slate-500">{templateType ? '엑셀 열' : 'Anki 필드명'}</p><div className="space-y-2">{columns.map((column) => <div key={column} className="flex items-center gap-3 rounded-xl border border-slate-200 bg-white px-3 py-2"><span className="w-8 text-center text-xs font-bold text-indigo-500">{String.fromCharCode(65 + column)}</span>{templateType ? <span className="min-w-0 flex-1 py-2.5 text-sm font-medium text-slate-600">{fieldNames[column] || `열 ${column + 1}`}</span> : <input value={fieldNames[column] ?? ''} onChange={(event) => setFieldNames((names) => names.map((name, index) => index === column ? event.target.value : name))} placeholder={`필드 ${column + 1}`} className="min-w-0 flex-1 bg-transparent py-2.5 text-sm font-medium text-slate-800 outline-none" />}</div>)}</div>{!templateType && invalidNames && <p className="mt-2 text-xs font-medium text-rose-600">비어 있거나 중복된 필드명이 있습니다.</p>}</div>
+        </section>
+      </div>
+      <div className="flex shrink-0 items-center justify-between border-t border-slate-200/80 bg-white px-5 py-4 sm:px-7"><p className="hidden text-xs text-slate-400 sm:block">저장 위치는 다음 단계에서 선택합니다.</p><div className="ml-auto flex gap-2"><button onClick={onCancel} className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-semibold text-slate-600 transition hover:bg-slate-50">취소</button><button disabled={invalidNames || !deckName.trim() || !noteTypeName.trim() || !preview.column_count || (!!templateType && Object.keys(templateMapping).length === 0)} onClick={() => void onCreate({ sheetName: preview.selected_sheet, firstRowIsHeader, fieldNames, deckName, noteTypeName, frontField, backField, templateSourcePath: templateType ? templateSourcePath : undefined, templateNoteTypeId: templateType?.id, fieldMapping: templateType ? templateMapping : undefined })} className="inline-flex items-center gap-2 rounded-xl bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white shadow-lg shadow-indigo-500/20 transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-400"><Sparkles size={16} />새 덱 초안 만들기</button></div></div>
+    </div>
+    {templateType && mappingOpen && <TemplateFieldMappingModal columns={columns} names={fieldNames} destination={templateType} mapping={templateMapping} activeColumn={activeColumn} onSelectColumn={(column) => { setActiveColumn(column); if (templateMapping[column] !== undefined) setTemplateMapping((current) => { const next = { ...current }; delete next[column]; return next }) }} onConnect={connectTemplateField} onCancel={() => { setTemplateMapping(mappingBeforeOpen); setMappingOpen(false); setActiveColumn(null) }} onDone={applyTemplateMapping} />}
+  </div>
+}
+
+function TemplateFieldMappingModal({ columns, names, destination, mapping, activeColumn, onSelectColumn, onConnect, onCancel, onDone }: { columns: number[]; names: string[]; destination: SourceNoteType; mapping: Record<number, number>; activeColumn: number | null; onSelectColumn: (column: number) => void; onConnect: (field: number) => void; onCancel: () => void; onDone: () => void }) {
+  const sourceAnchors = columns.map((_, index) => 28 + index * 56 + 20)
+  const destinationAnchors = destination.fields.map((_, index) => 28 + index * 56 + 20)
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') { event.preventDefault(); onCancel() }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onCancel])
+  return <div className="fixed inset-0 z-[120] grid place-items-center bg-slate-950/45 p-4 backdrop-blur-sm"><div role="dialog" aria-modal="true" aria-label="엑셀 열 연결" className="flex max-h-[calc(100vh-32px)] w-full max-w-3xl flex-col overflow-hidden rounded-[22px] border border-white/70 bg-white shadow-2xl"><div className="flex shrink-0 items-start justify-between border-b border-slate-100 p-6"><div><h3 className="text-lg font-semibold text-slate-900">엑셀 열 연결</h3><p className="mt-1 text-sm text-slate-500">왼쪽 열을 누른 뒤 오른쪽 필드를 누르면 연결됩니다.</p></div><button onClick={onCancel} className="grid h-9 w-9 place-items-center rounded-xl text-slate-400 transition hover:bg-slate-100 hover:text-slate-700" aria-label="연결 취소"><X size={19} /></button></div><div className="min-h-0 overflow-y-auto p-6"><div className="relative grid grid-cols-[1fr_72px_1fr] gap-3"><div className="space-y-2">{columns.map((column) => { const linked = mapping[column] !== undefined; return <button key={column} type="button" onClick={() => onSelectColumn(column)} className={`flex h-12 w-full items-center justify-between rounded-xl border px-3 text-left text-sm font-semibold ${activeColumn === column ? 'border-indigo-400 bg-indigo-50 text-indigo-700' : linked ? 'border-emerald-300 bg-emerald-50 text-emerald-800' : 'border-slate-200 bg-white text-slate-700'}`}><span className="truncate">{names[column] || `열 ${column + 1}`}</span><span className="h-3 w-3 rounded-full bg-indigo-500" /></button> })}</div><div className="relative"><svg className="pointer-events-none absolute inset-0 h-full w-full" viewBox={`0 0 72 ${Math.max(columns.length, destination.fields.length) * 56}`} preserveAspectRatio="none">{Object.entries(mapping).map(([source, target]) => <path key={`${source}-${target}`} d={`M 8 ${sourceAnchors[Number(source)]} C 36 ${sourceAnchors[Number(source)]}, 36 ${destinationAnchors[target]}, 64 ${destinationAnchors[target]}`} fill="none" stroke="#6366f1" strokeWidth="2.5" />)}</svg></div><div className="space-y-2">{destination.fields.map((field) => { const taken = Object.values(mapping).includes(field.order); return <button key={field.order} type="button" onClick={() => onConnect(field.order)} className={`flex h-12 w-full items-center justify-between rounded-xl border px-3 text-left text-sm font-semibold ${taken ? 'border-emerald-300 bg-emerald-50 text-emerald-800' : activeColumn !== null ? 'border-indigo-200 bg-indigo-50/40 text-slate-700' : 'border-slate-200 bg-white text-slate-700'}`}><span className="h-3 w-3 rounded-full bg-indigo-500" /><span className="truncate">{field.name}</span></button> })}</div></div></div><div className="flex shrink-0 justify-end gap-2 border-t border-slate-100 p-5"><button onClick={onCancel} className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-semibold text-slate-600">취소</button><button onClick={onDone} className="rounded-xl bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white">완료</button></div></div></div>
+}
+
 function SideAction({ label, icon: Icon, compact, disabled, onClick }: { label: string; icon: typeof Download; compact: boolean; disabled?: boolean; onClick: () => void }) { return <button disabled={disabled} onClick={onClick} title={label} className="flex h-9 w-full items-center rounded-xl px-3 text-[11px] font-medium text-slate-500 transition hover:bg-white/[.055] hover:text-slate-200 disabled:opacity-30"><Icon size={16} /><span className={`${compact ? 'w-0 opacity-0' : 'ml-3 opacity-100'} whitespace-nowrap transition-all`}>{label}</span></button> }
 
-function Welcome({ onOpen, busy, dragActive }: { onOpen: () => void; busy: boolean; dragActive: boolean }) { return <div className={`relative grid h-full min-h-0 place-items-center overflow-hidden rounded-[22px] bg-[#0d1425] px-5 transition lg:rounded-[28px] lg:px-6 ${dragActive ? 'ring-2 ring-cyan-200/80 ring-offset-4 ring-offset-[#eef1f7]' : ''}`}><div className="absolute inset-0 bg-[radial-gradient(ellipse_at_18%_22%,rgba(99,102,241,.32),transparent_36%),radial-gradient(ellipse_at_80%_78%,rgba(20,184,166,.17),transparent_37%)]" /><div className={`pointer-events-none absolute inset-4 rounded-[18px] border border-dashed border-cyan-200/0 transition lg:rounded-[24px] ${dragActive ? 'border-cyan-200/70 bg-cyan-200/[.04]' : ''}`} /><div className="relative max-w-xl text-center"><div className="welcome-rise mx-auto mb-5 grid h-14 w-14 place-items-center rounded-[19px] bg-white/10 ring-1 ring-white/15 lg:mb-7 lg:h-16 lg:w-16 lg:rounded-[22px]"><Sparkles className="text-violet-200" size={29} /></div><h2 className="text-[34px] font-semibold leading-[1.2] tracking-[-.045em] text-white sm:text-[38px] lg:text-[42px]"><span className="welcome-rise welcome-delay-title block">복잡한 Anki 파일,</span><span className="welcome-rise welcome-delay-subtitle block bg-gradient-to-r from-violet-300 to-cyan-200 bg-clip-text text-transparent">누구보다 쉽게 다루세요.</span></h2><p className="welcome-rise welcome-delay-copy mt-4 text-sm leading-6 text-slate-400">APKG와 Anki Helper 편집 프로젝트(.zip)를 모두 열 수 있습니다.</p><button onClick={onOpen} disabled={busy} className="welcome-rise welcome-delay-action mt-6 inline-flex h-11 items-center gap-2 rounded-xl bg-white px-5 text-sm font-semibold text-slate-900 lg:mt-7 lg:h-12">{busy ? <LoaderCircle className="animate-spin" size={18} /> : <FolderOpen size={18} />}파일 열기</button></div></div> }
+function Welcome({ onOpen, busy, dragActive }: { onOpen: () => void; busy: boolean; dragActive: boolean }) {
+  return <div className={`relative grid h-full min-h-0 place-items-center overflow-hidden rounded-[22px] bg-[#0d1425] px-5 transition lg:rounded-[28px] lg:px-6 ${dragActive ? 'ring-2 ring-cyan-200/80 ring-offset-4 ring-offset-[#eef1f7]' : ''}`}>
+    <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_18%_22%,rgba(99,102,241,.32),transparent_36%),radial-gradient(ellipse_at_80%_78%,rgba(20,184,166,.17),transparent_37%)]" />
+    <div className={`pointer-events-none absolute inset-4 rounded-[18px] border border-dashed border-cyan-200/0 transition lg:rounded-[24px] ${dragActive ? 'border-cyan-200/70 bg-cyan-200/[.04]' : ''}`} />
+    <div className="relative max-w-xl text-center"><div className="welcome-rise mx-auto mb-5 grid h-14 w-14 place-items-center rounded-[19px] bg-white/10 ring-1 ring-white/15 lg:mb-7 lg:h-16 lg:w-16 lg:rounded-[22px]"><Sparkles className="text-violet-200" size={29} /></div><h2 className="text-[34px] font-semibold leading-[1.2] tracking-[-.045em] text-white sm:text-[38px] lg:text-[42px]"><span className="welcome-rise welcome-delay-title block">복잡한 Anki 파일,</span><span className="welcome-rise welcome-delay-subtitle block bg-gradient-to-r from-violet-300 to-cyan-200 bg-clip-text text-transparent">누구보다 쉽게 다루세요.</span></h2><p className="welcome-rise welcome-delay-copy mt-4 text-sm leading-6 text-slate-400">Excel로 새 덱을 만들거나 기존 APKG를 열어 이어서 편집할 수 있습니다.</p><div className="welcome-rise welcome-delay-action mt-6 flex flex-col justify-center gap-2 sm:flex-row lg:mt-7"><button onClick={() => window.dispatchEvent(new Event('ankihelper:import-table'))} disabled={busy} className="inline-flex h-11 items-center justify-center gap-2 rounded-xl bg-white px-5 text-sm font-semibold text-slate-900 transition hover:bg-indigo-50 lg:h-12"><FileSpreadsheet size={18} />엑셀로 새 덱 만들기</button><button onClick={onOpen} disabled={busy} className="inline-flex h-11 items-center justify-center gap-2 rounded-xl border border-white/20 bg-white/5 px-5 text-sm font-semibold text-white transition hover:bg-white/10 lg:h-12">{busy ? <LoaderCircle className="animate-spin" size={18} /> : <FolderOpen size={18} />}기존 파일 열기</button></div></div>
+  </div>
+}
 
 function defaultFieldMapping(source: NoteType, destination: NoteType): Record<number, number> {
   const mapping: Record<number, number> = {}
@@ -352,6 +561,18 @@ function Overview({ workspace, selected, onPage, onSelect, onDeleteNoteType, onM
     setMapping({})
     setActiveSource(null)
   }
+
+  useEffect(() => {
+    if (!movingFrom) return
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      event.preventDefault()
+      if (movingTo) { setMovingTo(null); setMapping({}); setActiveSource(null) }
+      else closeMove()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [movingFrom, movingTo])
 
   const chooseDestination = (item: NoteType) => {
     if (!movingFrom) return
@@ -623,6 +844,17 @@ function FieldsPage({ noteType, onRename, onAdd, onDelete, onReorder, onMove, on
   const [summary, setSummary] = useState<{ filled: number; mixed: number; has_mixed: boolean; destination_filled: Record<string, number>; sample_text: string; sample_media: string } | null>(null)
   const [busyMove, setBusyMove] = useState(false)
 
+  useEffect(() => {
+    if (!moving) return
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      event.preventDefault()
+      setMoving(null); setDestination(null); setSummary(null)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [moving])
+
   if (!noteType) return null
   const filled = deleting ? noteType.notes.filter((row) => Boolean(row[deleting.order]?.trim())).length : 0
 
@@ -829,6 +1061,17 @@ function DesignPage({ noteType, index, setIndex, onSave, notify }: { noteType?: 
 }
 
 function PreviewPage({ noteType, side, setSide, noteIndex, setNoteIndex, previewHtml }: { noteType?: NoteType; side: 'front' | 'back'; setSide: (side: 'front' | 'back') => void; noteIndex: number; setNoteIndex: (index: number) => void; previewHtml: string }) { if (!noteType) return null; const total = Math.max(noteType.notes.length, 1); const doc = `<!doctype html><html><head><style>html,body{height:100%;margin:0}body{background:#fff}#anki-card{min-height:100%;box-sizing:border-box}</style></head><body class="card"><div id="anki-card" class="card">${previewHtml}</div><script>document.querySelectorAll('.anki-audio').forEach(b=>{let a;b.onclick=()=>{a??=new Audio(b.dataset.audio);if(a.paused){a.play();b.textContent='■';b.classList.add('playing')}else{a.pause();b.textContent='▶';b.classList.remove('playing')}a.onended=()=>{b.textContent='▶';b.classList.remove('playing')}}})</script></body></html>`; return <div className="mx-auto grid max-w-[1420px] gap-3 lg:grid-cols-[minmax(0,1fr)_230px] lg:gap-5 xl:grid-cols-[minmax(0,1fr)_250px]"><section className="grid min-h-[480px] place-items-center rounded-[20px] bg-[#172033] p-3 lg:min-h-[620px] lg:rounded-[26px] lg:p-5"><div className="flex h-[min(72vh,710px)] w-full max-w-[580px] flex-col overflow-hidden rounded-[24px] border-[6px] border-[#0a0f1d] bg-white shadow-2xl lg:rounded-[32px] lg:border-[7px]"><div className="flex h-11 shrink-0 items-center justify-between border-b px-5 text-[11px] text-slate-400"><span className="h-2 w-2 rounded-full bg-emerald-400" /><b>ANKI 미리보기</b><span>{noteIndex + 1} / {total}</span></div><iframe title="카드 미리보기" sandbox="allow-scripts allow-same-origin" srcDoc={doc} className="h-full w-full border-0" /></div></section><aside className="flex min-h-[170px] flex-col rounded-[18px] border border-slate-200/70 bg-white p-4 shadow-card lg:rounded-[22px] lg:p-5"><h2 className="text-lg font-semibold">실시간 미리보기</h2><div className="mt-4 grid grid-cols-2 rounded-xl bg-slate-100 p-1 lg:mt-6"><button onClick={() => setSide('front')} className={`rounded-lg py-2 text-xs font-semibold ${side === 'front' ? 'bg-white shadow-sm' : 'text-slate-400'}`}>앞면</button><button onClick={() => setSide('back')} className={`rounded-lg py-2 text-xs font-semibold ${side === 'back' ? 'bg-white shadow-sm' : 'text-slate-400'}`}>뒷면</button></div><div className="mt-auto grid grid-cols-2 gap-2"><button onClick={() => setNoteIndex((noteIndex - 1 + total) % total)} className="inline-flex items-center justify-center gap-2 rounded-xl border py-2.5 text-xs font-semibold"><ArrowLeft size={15} />이전</button><button onClick={() => setNoteIndex((noteIndex + 1) % total)} className="inline-flex items-center justify-center gap-2 rounded-xl bg-[#151d31] py-2.5 text-xs font-semibold text-white">다음<ArrowRight size={15} /></button></div></aside></div> }
+
+function UnsavedWorkModal({ onCancel, onSave, onDiscard }: { onCancel: () => void; onSave: () => void; onDiscard: () => void }) {
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') { event.preventDefault(); onCancel() }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onCancel])
+  return <div className="fixed inset-0 z-[210] grid place-items-center bg-slate-950/45 p-4 backdrop-blur-sm" onClick={onCancel}><div role="dialog" aria-modal="true" aria-label="새 작업 시작" className="w-full max-w-md rounded-[22px] border border-white/70 bg-white p-6 shadow-2xl" onClick={(event) => event.stopPropagation()}><div className="mb-4 grid h-11 w-11 place-items-center rounded-xl bg-amber-100 text-amber-700"><Save size={20} /></div><h3 className="text-lg font-semibold text-slate-900">저장하지 않은 변경이 있습니다</h3><p className="mt-2 text-sm leading-6 text-slate-500">현재 작업을 저장한 뒤 새 작업을 시작하거나, 저장하지 않고 계속할 수 있습니다.</p><div className="mt-6 flex flex-wrap justify-end gap-2"><button onClick={onCancel} className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-semibold text-slate-600">취소</button><button onClick={onDiscard} className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-semibold text-slate-700">저장하지 않고 계속</button><button onClick={onSave} className="rounded-xl bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white">저장 후 계속</button></div></div></div>
+}
 
 function Modal({ title, description, tone = 'normal', confirmLabel, onCancel, onConfirm }: { title: string; description: string; tone?: 'normal' | 'danger'; confirmLabel: string; onCancel?: () => void; onConfirm: () => void | Promise<void> }) {
   useEffect(() => {

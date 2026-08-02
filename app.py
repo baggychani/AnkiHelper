@@ -21,10 +21,12 @@ DESKTOP_APP = FRONTEND / "src-tauri" / "target" / "release" / "anki-helper.exe"
 INSTALLED_APP = Path(os.environ.get("LOCALAPPDATA", "")) / "Anki Helper" / "anki-helper.exe"
 CARGO_BIN = Path.home() / ".cargo" / "bin"
 SOURCE_MARKERS = (
-    FRONTEND / "src" / "App.tsx",
-    FRONTEND / "src-tauri" / "src" / "main.rs",
-    ROOT / "src" / "anki_helper" / "backend.py",
-    ROOT / "src" / "anki_helper" / "anki_package.py",
+    ROOT / "pyproject.toml",
+    FRONTEND / "package.json",
+    FRONTEND / "src-tauri" / "tauri.conf.json",
+    *sorted((FRONTEND / "src").glob("*")),
+    *sorted((FRONTEND / "src-tauri" / "src").glob("*.rs")),
+    *sorted((ROOT / "src" / "anki_helper").glob("*.py")),
 )
 DEV_PORTS = (1420, 8765)
 
