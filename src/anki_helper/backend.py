@@ -263,7 +263,7 @@ def _get_note_type(note_type_id: str) -> NoteType:
     raise HTTPException(status_code=404, detail="노트 타입을 찾지 못했습니다.")
 
 
-def _embed_preview_media(markup: str, media_base_url: str = "http://127.0.0.1:8765") -> str:
+def _embed_preview_media(markup: str, media_base_url: str = "http://127.0.0.1:8765", preview_key: str = "default") -> str:
     """Resolve referenced APKG assets inside the isolated preview iframe.
 
     Card previews live in an ``srcDoc`` iframe, where a template reference such
@@ -370,6 +370,17 @@ def _embed_preview_media(markup: str, media_base_url: str = "http://127.0.0.1:87
         serialized = json.dumps(urls, ensure_ascii=False).replace("<", "\\u003c").replace(">", "\\u003e")
         return f"""<script>(function(){{
 const assets={serialized};
+const previewKey={json.dumps(preview_key)};
+const host=window.parent;
+const states=host.__ankiHelperPreviewState||(host.__ankiHelperPreviewState=Object.create(null));
+const cardState=states[previewKey]||(states[previewKey]={{session:Object.create(null),local:Object.create(null)}});
+const nativeGet=Storage.prototype.getItem;
+const nativeSet=Storage.prototype.setItem;
+const nativeRemove=Storage.prototype.removeItem;
+const bucket=storage=>storage===window.sessionStorage?cardState.session:cardState.local;
+Storage.prototype.getItem=function(key){{const value=bucket(this)[String(key)];return value===undefined?nativeGet.call(this,key):value;}};
+Storage.prototype.setItem=function(key,value){{bucket(this)[String(key)]=String(value);try{{nativeSet.call(this,key,value)}}catch(_error){{}}}};
+Storage.prototype.removeItem=function(key){{delete bucket(this)[String(key)];try{{nativeRemove.call(this,key)}}catch(_error){{}}}};
 const resolve=value=>{{
   if(typeof value!=="string")return value;
   const plain=value.split(/[?#]/,1)[0];
@@ -893,7 +904,8 @@ def preview_card(
     body = front if side == "front" else render_template(template.back, note_type.fields, values, front)
     helper_css = ".anki-audio{display:inline-grid;place-items:center;width:36px;height:36px;margin:0 0 0 10px;border:1px solid #f4b183;border-radius:999px;background:#fff7ef;color:#d44709;font:700 16px/1 system-ui,sans-serif;cursor:pointer;vertical-align:middle}.anki-audio.playing{background:#d44709;color:#fff}"
     markup = f"<style>{helper_css}{note_type.css}</style>{body}"
-    return {"html": _embed_preview_media(markup, str(request.base_url).rstrip("/"))}
+    preview_key = f"{note_type_id}:{template_index}:{note_index % max(len(note_type.notes), 1)}"
+    return {"html": _embed_preview_media(markup, str(request.base_url).rstrip("/"), preview_key)}
 
 
 @app.get("/api/note-types/{note_type_id}/export/{kind}")
