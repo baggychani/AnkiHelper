@@ -91,7 +91,21 @@ class MediaWorkflowTests(unittest.TestCase):
 
         self.assertNotIn('src="_badge.svg"', preview)
         self.assertNotIn('url("_badge.svg")', preview)
-        self.assertEqual(2, preview.count("http://127.0.0.1:8765/api/media/0"))
+        self.assertEqual(3, preview.count("http://127.0.0.1:8765/api/media/0"))
+
+    @unittest.skipIf(backend is None, "FastAPI is required for backend preview tests")
+    def test_preview_resolves_dynamic_template_media_assignments(self) -> None:
+        import_media(self.package, [self.asset], template_asset=True)
+        previous_package = backend._package
+        backend._package = self.package
+        try:
+            preview = backend._embed_preview_media('<script>const filename = "_badge.svg"; image.src = filename</script>')
+        finally:
+            backend._package = previous_package
+
+        self.assertIn('const assets={"_badge.svg": "http://127.0.0.1:8765/api/media/0"}', preview)
+        self.assertIn('patch(HTMLImageElement.prototype,"src")', preview)
+        self.assertLess(preview.index('patch(HTMLImageElement.prototype,"src")'), preview.index('image.src = filename'))
 
     @unittest.skipIf(backend is None, "FastAPI is required for backend preview tests")
     def test_preview_rewrites_linked_stylesheet_assets(self) -> None:

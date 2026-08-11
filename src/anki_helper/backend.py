@@ -9,6 +9,7 @@ from __future__ import annotations
 import tempfile
 import base64
 import html
+import json
 import mimetypes
 import re
 import sqlite3
@@ -268,7 +269,8 @@ def _embed_preview_media(markup: str, media_base_url: str = "http://127.0.0.1:87
     Card previews live in an ``srcDoc`` iframe, where a template reference such
     as ``<img src="_logo.svg">`` has no APKG media directory to resolve from.
     Absolute local API URLs work for pending files too, without copying large
-    images, videos, or fonts into every preview response.
+    images, videos, or fonts into every preview response. The runtime resolver
+    also handles template JavaScript such as ``image.src = "_logo.svg"``.
     """
     if _package is None:
         return markup
@@ -359,12 +361,43 @@ def _embed_preview_media(markup: str, media_base_url: str = "http://127.0.0.1:87
             return f"<span class='sound'>🔊 {html.escape(filename)}</span>"
         return f"<button type='button' class='anki-audio sound' data-audio='{value}' aria-label='음성 재생'>▶</button>"
 
+    def runtime_resolver() -> str:
+        """Map dynamic DOM media assignments before template scripts execute."""
+        urls = {
+            filename: f"{media_base_url.rstrip('/')}/api/media/{quote(stored_name, safe='')}"
+            for filename, stored_name in media_by_name.items()
+        }
+        serialized = json.dumps(urls, ensure_ascii=False).replace("<", "\\u003c").replace(">", "\\u003e")
+        return f"""<script>(function(){{
+const assets={serialized};
+const resolve=value=>{{
+  if(typeof value!=="string")return value;
+  const plain=value.split(/[?#]/,1)[0];
+  return assets[value]||assets[plain]||value;
+}};
+const patch=(prototype,property)=>{{
+  const descriptor=Object.getOwnPropertyDescriptor(prototype,property);
+  if(!descriptor||!descriptor.get||!descriptor.set)return;
+  Object.defineProperty(prototype,property,{{...descriptor,set(value){{descriptor.set.call(this,resolve(value));}}}});
+}};
+patch(HTMLImageElement.prototype,"src");
+patch(HTMLAudioElement.prototype,"src");
+patch(HTMLVideoElement.prototype,"src");
+patch(HTMLSourceElement.prototype,"src");
+const setAttribute=Element.prototype.setAttribute;
+Element.prototype.setAttribute=function(name,value){{
+  const attribute=String(name).toLowerCase();
+  return setAttribute.call(this,name,attribute==="src"||attribute==="poster"?resolve(value):value);
+}};
+window.__ankiHelperResolveMediaUrl=resolve;
+}})();</script>"""
+
     try:
         markup = _sound_marker.sub(replace_sound, markup)
         markup = _preview_url_attribute.sub(replace_src, markup)
         markup = _srcset_attribute.sub(replace_srcset, markup)
         markup = _css_import.sub(replace_css_import, markup)
-        return _css_url.sub(replace_css_url, markup)
+        return runtime_resolver() + _css_url.sub(replace_css_url, markup)
     finally:
         if archive is not None:
             archive.close()
