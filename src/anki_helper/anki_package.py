@@ -9,19 +9,41 @@ import re
 import sqlite3
 import tempfile
 import shutil
+import unicodedata
 import zlib
 import xml.etree.ElementTree as ET
 from copy import deepcopy
 from datetime import datetime
 import zipfile
 from dataclasses import asdict, dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Literal
+from urllib.parse import unquote
 from uuid import uuid4
 
 
 FIELD_TOKEN = re.compile(r"{{(?:#|\^)?\s*([^{}:#]+?)(?::[^{}]+)?\s*}}")
-MEDIA_TOKEN = re.compile(r"\[sound:[^\]]+\]|<img\b[^>]*>", re.IGNORECASE)
+MEDIA_TOKEN = re.compile(
+    r"\[sound:[^\]]+\]|<img\b[^>]*>|<(?:audio|video)\b[^>]*>.*?</(?:audio|video)>",
+    re.IGNORECASE | re.DOTALL,
+)
+SOUND_REFERENCE = re.compile(r"\[sound:([^\]]+)\]", re.IGNORECASE)
+HTML_MEDIA_ATTRIBUTE = re.compile(
+    r"<(?:img|audio|video|source|track|script|iframe|embed|object)\b[^>]*?\s(?:src|poster|data)\s*=\s*(?:[\"'](?P<quoted>.*?)[\"']|(?P<bare>[^\s>]+))",
+    re.IGNORECASE,
+)
+HTML_STYLESHEET_HREF = re.compile(
+    r"<link\b[^>]*?\s(?:rel\s*=\s*[\"']?stylesheet[\"']?[^>]*?\s)?href\s*=\s*(?:[\"'](?P<quoted>.*?)[\"']|(?P<bare>[^\s>]+))",
+    re.IGNORECASE,
+)
+HTML_SRCSET = re.compile(r"\ssrcset\s*=\s*(?:[\"'](?P<quoted>.*?)[\"']|(?P<bare>[^\s>]+))", re.IGNORECASE)
+CSS_URL_REFERENCE = re.compile(r"url\(\s*(?:[\"'](?P<quoted>.*?)[\"']|(?P<bare>[^)\s]+))\s*\)", re.IGNORECASE)
+CSS_IMPORT_REFERENCE = re.compile(r"@import\s+(?:[\"'](?P<quoted>.*?)[\"']|url\(\s*[\"']?(?P<bare>[^)\s\"']+)[\"']?\s*\))", re.IGNORECASE)
+WINDOWS_RESERVED_FILENAMES = {
+    "CON", "PRN", "AUX", "NUL", *(f"COM{index}" for index in range(1, 10)), *(f"LPT{index}" for index in range(1, 10)),
+}
+WINDOWS_ILLEGAL_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+MAX_MEDIA_FILENAME_BYTES = 180
 
 
 @dataclass(slots=True)
@@ -80,6 +102,13 @@ class TablePreview:
     selected_sheet: str
     rows: list[list[str]]
     omitted_empty_columns: int = 0
+
+
+@dataclass(slots=True, frozen=True)
+class MediaReference:
+    filename: str
+    location: str
+    source: Literal["field", "template", "css"]
 
 
 def read_apkg(path: str | Path) -> DeckPackage:
@@ -1142,12 +1171,16 @@ def export_design(note_type: NoteType, destination: str | Path) -> Path:
     return target
 
 
-def _media_type(name: str) -> Literal["audio", "image", "other"]:
+def _media_type(name: str) -> Literal["audio", "image", "video", "font", "other"]:
     suffix = Path(name).suffix.lower()
-    if suffix in {".mp3", ".wav", ".ogg", ".m4a", ".flac"}:
+    if suffix in {".mp3", ".wav", ".ogg", ".m4a", ".flac", ".opus", ".aac", ".aiff", ".aif", ".wma"}:
         return "audio"
-    if suffix in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"}:
+    if suffix in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".avif", ".bmp", ".ico", ".apng"}:
         return "image"
+    if suffix in {".mp4", ".m4v", ".webm", ".ogv", ".mov", ".avi"}:
+        return "video"
+    if suffix in {".woff", ".woff2", ".ttf", ".otf", ".eot"}:
+        return "font"
     return "other"
 
 
@@ -1182,18 +1215,31 @@ def media_items(package: DeckPackage) -> list[dict[str, Any]]:
 
 
 def _safe_media_name(name: str) -> str:
-    clean = Path(name).name.strip()
+    """Return an Anki-sync-safe basename without changing ordinary filenames."""
+    clean = PurePosixPath(name.replace("\\", "/")).name.strip()
+    clean = unicodedata.normalize("NFC", clean)
+    clean = WINDOWS_ILLEGAL_FILENAME_CHARS.sub("_", clean).rstrip(". ")
     if not clean or clean in {".", ".."}:
         raise ValueError("미디어 파일 이름을 확인할 수 없습니다.")
+    stem, suffix = Path(clean).stem, Path(clean).suffix
+    if stem.upper() in WINDOWS_RESERVED_FILENAMES:
+        clean = f"_{stem}{suffix}"
+        stem = Path(clean).stem
+    while len(clean.encode("utf-8")) > MAX_MEDIA_FILENAME_BYTES and stem:
+        stem = stem[:-1]
+        clean = f"{stem}{suffix}"
+    if not stem:
+        raise ValueError("미디어 파일 이름이 너무 짧거나 사용할 수 없는 문자만 포함합니다.")
     return clean
 
 
 def _unique_media_name(name: str, used: set[str]) -> str:
-    if name not in used:
+    used_casefolded = {item.casefold() for item in used}
+    if name.casefold() not in used_casefolded:
         return name
     stem, suffix = Path(name).stem, Path(name).suffix
     counter = 2
-    while f"{stem}-{counter}{suffix}" in used:
+    while f"{stem}-{counter}{suffix}".casefold() in used_casefolded:
         counter += 1
     return f"{stem}-{counter}{suffix}"
 
@@ -1255,6 +1301,101 @@ def export_media(package: DeckPackage, destination: str | Path) -> Path:
         for item in media_items(package):
             output.writestr(f"media/{item['name']}", _media_bytes(package, item["stored_name"], source))
     return target
+
+
+def media_reference_filename(value: str) -> str | None:
+    """Normalize an Anki template/field media URL to its stored filename.
+
+    Anki stores the original filename in its media map but URL-encodes spaces
+    and special characters in HTML. External URLs and dynamic field references
+    deliberately stay outside the local-media health report.
+    """
+    raw = html.unescape(value).strip()
+    if not raw or raw.startswith(("#", "data:", "javascript:", "mailto:", "http:", "https:", "//", "{{")):
+        return None
+    raw = unquote(raw).split("?", 1)[0].split("#", 1)[0].replace("\\", "/")
+    name = PurePosixPath(raw).name
+    return name if name and name not in {".", ".."} else None
+
+
+def _markup_media_values(markup: str) -> list[str]:
+    values = [match.group(1) for match in SOUND_REFERENCE.finditer(markup)]
+    for pattern in (HTML_MEDIA_ATTRIBUTE, HTML_STYLESHEET_HREF, HTML_SRCSET, CSS_URL_REFERENCE, CSS_IMPORT_REFERENCE):
+        for match in pattern.finditer(markup):
+            value = match.group("quoted") or match.group("bare")
+            if value:
+                if pattern is HTML_SRCSET:
+                    values.extend(candidate.strip().split()[0] for candidate in value.split(",") if candidate.strip())
+                else:
+                    values.append(value)
+    return values
+
+
+def _media_is_available(package: DeckPackage, stored_name: str) -> bool:
+    staged_path = package.pending_media.get(stored_name)
+    return staged_path.is_file() if staged_path else stored_name in package.archive_entries and stored_name not in package.removed_media
+
+
+def media_health(package: DeckPackage) -> dict[str, Any]:
+    """Report missing, unused, and unsafe media relationships without mutating a deck."""
+    available: dict[str, str] = {}
+    mapped_missing: list[dict[str, str]] = []
+    casefolded: dict[str, list[str]] = {}
+    for stored_name, name in package.media.items():
+        if _media_is_available(package, stored_name):
+            available[name] = name
+            canonical = media_reference_filename(name)
+            if canonical:
+                available.setdefault(canonical, name)
+        else:
+            mapped_missing.append({"name": name, "stored_name": stored_name})
+        casefolded.setdefault(name.casefold(), []).append(name)
+
+    references: dict[str, list[MediaReference]] = {}
+    missing: list[MediaReference] = []
+
+    def inspect(markup: str, location: str, source: Literal["field", "template", "css"]) -> None:
+        for raw in _markup_media_values(markup):
+            filename = media_reference_filename(raw)
+            if filename is None:
+                continue
+            reference = MediaReference(filename=filename, location=location, source=source)
+            actual_name = available.get(filename)
+            if actual_name:
+                references.setdefault(actual_name, []).append(reference)
+            else:
+                missing.append(reference)
+
+    for note_type in package.note_types:
+        inspect(note_type.css, f"{note_type.name} · 공통 CSS", "css")
+        for template in note_type.templates:
+            inspect(template.front, f"{note_type.name} · {template.name} 앞면", "template")
+            inspect(template.back, f"{note_type.name} · {template.name} 뒷면", "template")
+        for note_index, values in enumerate(note_type.notes, 1):
+            for field in note_type.fields:
+                if field.order < len(values):
+                    inspect(values[field.order], f"{note_type.name} · {note_index}번 노트 · {field.name}", "field")
+
+    items = media_items(package)
+    used_names = set(references)
+    unused = [item for item in items if item["name"] not in used_names and not item["name"].startswith("_")]
+    static_unreferenced = [item for item in items if item["name"].startswith("_") and item["name"] not in used_names]
+    collisions = [sorted(names, key=str.casefold) for names in casefolded.values() if len(names) > 1]
+    indexed_entries = set(package.media) | {"media", package.database_name}
+    unindexed = sorted(entry for entry in package.archive_entries if entry.isdigit() and entry not in indexed_entries)
+    return {
+        "missing": [asdict(reference) for reference in missing],
+        "references": {name: [asdict(reference) for reference in items] for name, items in references.items()},
+        "unused": unused,
+        "static_unreferenced": static_unreferenced,
+        "mapped_missing": mapped_missing,
+        "case_collisions": collisions,
+        "unindexed_entries": unindexed,
+    }
+
+
+def media_references_for(package: DeckPackage, name: str) -> list[dict[str, str]]:
+    return media_health(package)["references"].get(name, [])
 
 
 def export_project(package: DeckPackage, note_type: NoteType, destination: str | Path) -> Path:

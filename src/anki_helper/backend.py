@@ -18,8 +18,9 @@ from uuid import uuid4
 from dataclasses import asdict
 from pathlib import Path
 from typing import Literal
+from urllib.parse import quote
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -39,7 +40,10 @@ from .anki_package import (
     import_project,
     import_media,
     inspect_table_source,
+    media_health,
     media_items,
+    media_reference_filename,
+    media_references_for,
     move_note_field_contents,
     move_notes_between_types,
     read_apkg,
@@ -74,6 +78,19 @@ _package: DeckPackage | None = None
 _selected_note_type_id: str | None = None
 _requires_save_as = False
 _sound_marker = re.compile(r"<span class='sound' data-sound='([^']+)'>.*?</span>")
+_preview_url_attribute = re.compile(
+    r"(?P<prefix>\b(?:src|poster|href)\s*=\s*)(?:(?P<quote>[\"'])(?P<quoted>.*?)(?P=quote)|(?P<bare>[^\s>]+))",
+    re.IGNORECASE,
+)
+_css_url = re.compile(
+    r"url\(\s*(?:(?P<quote>[\"'])(?P<quoted>.*?)(?P=quote)|(?P<bare>[^)\s]+))\s*\)",
+    re.IGNORECASE,
+)
+_css_import = re.compile(r"(?P<prefix>@import\s+)(?P<quote>[\"'])(?P<url>.*?)(?P=quote)", re.IGNORECASE)
+_srcset_attribute = re.compile(
+    r"(?P<prefix>\bsrcset\s*=\s*)(?:(?P<quote>[\"'])(?P<quoted>.*?)(?P=quote)|(?P<bare>[^\s>]+))",
+    re.IGNORECASE,
+)
 
 
 def _temporary_file_response(path: Path, *, filename: str, media_type: str) -> FileResponse:
@@ -102,6 +119,12 @@ def _cleanup_ephemeral_package(package: DeckPackage | None, requires_save_as: bo
             source.unlink(missing_ok=True)
     except OSError:
         pass
+
+
+@app.on_event("shutdown")
+def cleanup_on_shutdown() -> None:
+    """Do not leave unsaved staged media copies in the system temp directory."""
+    _cleanup_ephemeral_package(_package, _requires_save_as)
 
 
 class OpenPackageRequest(BaseModel):
@@ -239,26 +262,112 @@ def _get_note_type(note_type_id: str) -> NoteType:
     raise HTTPException(status_code=404, detail="노트 타입을 찾지 못했습니다.")
 
 
-def _embed_media_audio(markup: str) -> str:
-    """Turn Anki sound markers into playable inline audio for the preview."""
+def _embed_preview_media(markup: str, media_base_url: str = "http://127.0.0.1:8765") -> str:
+    """Resolve referenced APKG assets inside the isolated preview iframe.
+
+    Card previews live in an ``srcDoc`` iframe, where a template reference such
+    as ``<img src="_logo.svg">`` has no APKG media directory to resolve from.
+    Absolute local API URLs work for pending files too, without copying large
+    images, videos, or fonts into every preview response.
+    """
     if _package is None:
         return markup
 
-    def replace(match: re.Match[str]) -> str:
-        filename = match.group(1)
-        stored_name = next((stored for stored, original in _package.media.items() if original == filename), filename)
-        if stored_name not in _package.archive_entries:
-            return f"<span class='sound'>🔊 {html.escape(filename)}</span>"
-        try:
-            with zipfile.ZipFile(_package.source) as archive:
-                payload = archive.read(stored_name)
-        except (OSError, KeyError, zipfile.BadZipFile):
-            return f"<span class='sound'>🔊 {html.escape(filename)}</span>"
-        media_type = mimetypes.guess_type(filename)[0] or "audio/mpeg"
-        encoded = base64.b64encode(payload).decode("ascii")
-        return f"<button type='button' class='anki-audio sound' data-audio='data:{media_type};base64,{encoded}' aria-label='음성 재생'>▶</button>"
+    media_by_name = {
+        filename: stored_name
+        for stored_name, original_name in _package.media.items()
+        if (filename := media_reference_filename(original_name)) is not None
+    }
+    stylesheet_urls: dict[str, str | None] = {}
+    stylesheet_stack: set[str] = set()
+    archive: zipfile.ZipFile | None = None
 
-    return _sound_marker.sub(replace, markup)
+    def media_url(value: str) -> str | None:
+        filename = media_reference_filename(value)
+        stored_name = media_by_name.get(filename or "")
+        if stored_name is None:
+            return None
+        return f"{media_base_url.rstrip('/')}/api/media/{quote(stored_name, safe='')}"
+
+    def stylesheet_url(value: str) -> str | None:
+        """Inline local CSS after rewriting its own local asset references."""
+        filename = media_reference_filename(value)
+        if filename is None or not filename.casefold().endswith(".css"):
+            return None
+        if filename in stylesheet_urls:
+            return stylesheet_urls[filename]
+        if filename in stylesheet_stack:
+            return None
+        stored_name = media_by_name.get(filename)
+        if stored_name is None:
+            stylesheet_urls[filename] = None
+            return None
+        stylesheet_stack.add(filename)
+        try:
+            staged_path = _package.pending_media.get(stored_name)
+            if staged_path and staged_path.is_file():
+                payload = staged_path.read_bytes()
+            else:
+                nonlocal archive
+                if stored_name not in _package.archive_entries:
+                    stylesheet_urls[filename] = None
+                    return None
+                if archive is None:
+                    archive = zipfile.ZipFile(_package.source)
+                payload = archive.read(stored_name)
+            stylesheet = payload.decode("utf-8-sig")
+            stylesheet = _css_import.sub(replace_css_import, stylesheet)
+            stylesheet = _css_url.sub(replace_css_url, stylesheet)
+            result = f"data:text/css;base64,{base64.b64encode(stylesheet.encode('utf-8')).decode('ascii')}"
+            stylesheet_urls[filename] = result
+            return result
+        except (OSError, UnicodeDecodeError, KeyError, zipfile.BadZipFile):
+            stylesheet_urls[filename] = None
+            return None
+        finally:
+            stylesheet_stack.discard(filename)
+
+    def replace_src(match: re.Match[str]) -> str:
+        raw = match.group("quoted") or match.group("bare")
+        value = stylesheet_url(raw) if "href" in match.group("prefix").casefold() else None
+        value = value or media_url(raw)
+        return f'{match.group("prefix")}"{value}"' if value else match.group(0)
+
+    def replace_css_url(match: re.Match[str]) -> str:
+        value = media_url(match.group("quoted") or match.group("bare"))
+        return f'url("{value}")' if value else match.group(0)
+
+    def replace_css_import(match: re.Match[str]) -> str:
+        value = stylesheet_url(match.group("url")) or media_url(match.group("url"))
+        return f'{match.group("prefix")}"{value}"' if value else match.group(0)
+
+    def replace_srcset(match: re.Match[str]) -> str:
+        raw = match.group("quoted") or match.group("bare")
+        values = []
+        for candidate in raw.split(","):
+            parts = candidate.strip().split(maxsplit=1)
+            if not parts:
+                continue
+            value = media_url(parts[0]) or parts[0]
+            values.append(" ".join((value, *parts[1:])))
+        return f'{match.group("prefix")}"{", ".join(values)}"'
+
+    def replace_sound(match: re.Match[str]) -> str:
+        filename = match.group(1)
+        value = media_url(filename)
+        if value is None:
+            return f"<span class='sound'>🔊 {html.escape(filename)}</span>"
+        return f"<button type='button' class='anki-audio sound' data-audio='{value}' aria-label='음성 재생'>▶</button>"
+
+    try:
+        markup = _sound_marker.sub(replace_sound, markup)
+        markup = _preview_url_attribute.sub(replace_src, markup)
+        markup = _srcset_attribute.sub(replace_srcset, markup)
+        markup = _css_import.sub(replace_css_import, markup)
+        return _css_url.sub(replace_css_url, markup)
+    finally:
+        if archive is not None:
+            archive.close()
 
 
 @app.get("/api/health")
@@ -447,6 +556,13 @@ def list_media() -> list[dict]:
     return media_items(_package)
 
 
+@app.get("/api/media/health")
+def inspect_media_health() -> dict:
+    if _package is None:
+        raise HTTPException(status_code=404, detail="먼저 APKG 파일을 열어주세요.")
+    return media_health(_package)
+
+
 @app.post("/api/media/import")
 def add_media(payload: MediaImportRequest) -> dict:
     if _package is None:
@@ -461,14 +577,22 @@ def add_media(payload: MediaImportRequest) -> dict:
 
 
 @app.delete("/api/media/{stored_name}")
-def delete_media(stored_name: str) -> dict:
+def delete_media(stored_name: str, force: bool = False) -> dict:
     if _package is None:
         raise HTTPException(status_code=404, detail="먼저 APKG 파일을 열어주세요.")
+    item = next((entry for entry in media_items(_package) if entry["stored_name"] == stored_name), None)
+    if item is None:
+        raise HTTPException(status_code=404, detail="미디어 파일을 찾지 못했습니다.")
+    references = media_references_for(_package, item["name"])
+    if references and not force:
+        locations = ", ".join(reference["location"] for reference in references[:3])
+        extra = f" 외 {len(references) - 3}곳" if len(references) > 3 else ""
+        raise HTTPException(status_code=409, detail=f"이 미디어는 {locations}{extra}에서 사용 중입니다. 강제로 삭제할 수 있습니다.")
     try:
         remove_media(_package, stored_name)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return {"workspace": _workspace_data()}
+    return {"workspace": _workspace_data(), "references": references}
 
 
 @app.get("/api/media/{stored_name}")
@@ -707,6 +831,7 @@ def move_notes(note_type_id: str, payload: NoteTypeMoveNotes) -> dict:
 
 @app.get("/api/note-types/{note_type_id}/preview")
 def preview_card(
+    request: Request,
     note_type_id: str,
     template_index: int = 0,
     side: Literal["front", "back"] = "front",
@@ -720,7 +845,8 @@ def preview_card(
     front = render_template(template.front, note_type.fields, values)
     body = front if side == "front" else render_template(template.back, note_type.fields, values, front)
     helper_css = ".anki-audio{display:inline-grid;place-items:center;width:36px;height:36px;margin:0 0 0 10px;border:1px solid #f4b183;border-radius:999px;background:#fff7ef;color:#d44709;font:700 16px/1 system-ui,sans-serif;cursor:pointer;vertical-align:middle}.anki-audio.playing{background:#d44709;color:#fff}"
-    return {"html": f"<style>{helper_css}{note_type.css}</style>{_embed_media_audio(body)}"}
+    markup = f"<style>{helper_css}{note_type.css}</style>{body}"
+    return {"html": _embed_preview_media(markup, str(request.base_url).rstrip("/"))}
 
 
 @app.get("/api/note-types/{note_type_id}/export/{kind}")

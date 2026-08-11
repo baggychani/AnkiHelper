@@ -1,7 +1,18 @@
 export type Field = { name: string; order: number }
 export type Template = { name: string; front: string; back: string }
 export type NoteType = { id: string; name: string; fields: Field[]; templates: Template[]; css: string; notes: string[][] }
-export type MediaItem = { name: string; stored_name: string; size: number; type: 'audio' | 'image' | 'other' }
+export type MediaKind = 'audio' | 'image' | 'video' | 'font' | 'other'
+export type MediaItem = { name: string; stored_name: string; size: number; type: MediaKind }
+export type MediaReference = { filename: string; location: string; source: 'field' | 'template' | 'css' }
+export type MediaHealth = {
+  missing: MediaReference[]
+  references: Record<string, MediaReference[]>
+  unused: MediaItem[]
+  static_unreferenced: MediaItem[]
+  mapped_missing: { name: string; stored_name: string }[]
+  case_collisions: string[][]
+  unindexed_entries: string[]
+}
 export type Workspace = {
   source: string
   source_name: string
@@ -130,8 +141,9 @@ export const api = {
   savePackage: (path?: string) =>
     request<{ workspace: Workspace; saved_to: string; backup: string | null }>('/api/packages/save', { method: 'POST', body: JSON.stringify({ path: path ?? null }) }),
   media: () => request<MediaItem[]>('/api/media'),
+  mediaHealth: () => request<MediaHealth>('/api/media/health'),
   importMedia: (paths: string[], templateAsset = false) => request<{ workspace: Workspace; items: MediaItem[] }>('/api/media/import', { method: 'POST', body: JSON.stringify({ paths, template_asset: templateAsset }) }),
-  deleteMedia: (storedName: string) => request<{ workspace: Workspace }>(`/api/media/${encodeURIComponent(storedName)}`, { method: 'DELETE' }),
+  deleteMedia: (storedName: string, force = false) => request<{ workspace: Workspace }>(`/api/media/${encodeURIComponent(storedName)}?force=${force}`, { method: 'DELETE' }),
   mediaUrl: (storedName: string) => `${base}/api/media/${encodeURIComponent(storedName)}`,
   importProject: (path: string) => request<{ workspace: Workspace; note_type_id: string }>('/api/projects/import', { method: 'POST', body: JSON.stringify({ path }) }),
   preview: (noteTypeId: string, templateIndex: number, side: 'front' | 'back', noteIndex: number) =>
