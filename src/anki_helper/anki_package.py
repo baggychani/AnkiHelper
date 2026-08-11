@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import html
 import io
 import json
@@ -341,6 +342,23 @@ def _encode_varint(value: int) -> bytes:
         output.append(byte | (0x80 if value else 0))
         if not value:
             return bytes(output)
+
+
+def _protobuf_bytes_field(field_number: int, value: bytes) -> bytes:
+    return _encode_varint((field_number << 3) | 2) + _encode_varint(len(value)) + value
+
+
+def _encode_modern_media_index(entries: list[tuple[str, bytes]]) -> bytes:
+    """Encode Anki's modern media index (name, size, SHA-1 per entry)."""
+    output = bytearray()
+    for name, payload in entries:
+        encoded_name = name.encode("utf-8")
+        entry = bytearray(_protobuf_bytes_field(1, encoded_name))
+        entry.extend(_encode_varint(2 << 3))
+        entry.extend(_encode_varint(len(payload)))
+        entry.extend(_protobuf_bytes_field(3, hashlib.sha1(payload).digest()))
+        output.extend(_protobuf_bytes_field(1, bytes(entry)))
+    return bytes(output)
 
 
 def _replace_protobuf_text(blob: bytes, field_number: int, text: str) -> bytes:
@@ -869,19 +887,56 @@ def save_apkg(package: DeckPackage, destination: str | Path | None = None, *, ba
                 if package.database_name.endswith(".anki21b"):
                     updated_database = _compress_anki21b(updated_database)
                 temp_output = target.with_suffix(target.suffix + ".tmp")
-                media_payload = json.dumps(package.media, ensure_ascii=False).encode("utf-8")
-                if "media" in package.archive_entries and source_archive.read("media").startswith(b"\x28\xb5\x2f\xfd"):
-                    media_payload = _compress_anki21b(media_payload)
+                original_media_index = source_archive.read("media") if "media" in package.archive_entries else b""
+                modern_media = package.database_name.endswith(".anki21b")
+                media_changed = bool(package.pending_media or package.removed_media)
+                modern_index_is_protobuf = False
+                if modern_media and original_media_index.startswith(b"\x28\xb5\x2f\xfd"):
+                    try:
+                        json.loads(_decompress_anki21b(original_media_index).decode("utf-8"))
+                    except (UnicodeDecodeError, json.JSONDecodeError):
+                        modern_index_is_protobuf = True
+                preserve_modern_index = modern_index_is_protobuf and not media_changed
+                rebuilt_media: list[tuple[str, str, bytes]] = []
+                if modern_media and not preserve_modern_index:
+                    def media_order(item: tuple[str, str]) -> tuple[int, int | str]:
+                        stored_name = item[0]
+                        return (0, int(stored_name)) if stored_name.isdigit() else (1, stored_name)
+
+                    for new_index, (stored_name, name) in enumerate(sorted(package.media.items(), key=media_order)):
+                        staged_path = package.pending_media.get(stored_name)
+                        if staged_path:
+                            decoded = staged_path.read_bytes()
+                        else:
+                            decoded = decode_media_payload(source_archive.read(stored_name))
+                        rebuilt_media.append((str(new_index), name, decoded))
+                    media_payload = _compress_anki21b(
+                        _encode_modern_media_index([(name, decoded) for _stored, name, decoded in rebuilt_media])
+                    )
+                elif preserve_modern_index:
+                    media_payload = original_media_index
+                else:
+                    media_payload = json.dumps(package.media, ensure_ascii=False).encode("utf-8")
+                    if original_media_index.startswith(b"\x28\xb5\x2f\xfd"):
+                        media_payload = _compress_anki21b(media_payload)
                 with zipfile.ZipFile(temp_output, "w", zipfile.ZIP_DEFLATED) as output:
                     for item in source_archive.infolist():
                         if item.filename in package.removed_media:
+                            continue
+                        if rebuilt_media and (item.filename == "media" or item.filename in package.archive_entries and item.filename.isdigit()):
                             continue
                         payload = updated_database if item.filename == package.database_name else media_payload if item.filename == "media" else source_archive.read(item.filename)
                         output.writestr(item, payload)
                     if "media" not in package.archive_entries:
                         output.writestr("media", media_payload)
-                    for stored_name, staged_path in package.pending_media.items():
-                        output.write(staged_path, stored_name)
+                    if rebuilt_media:
+                        if "media" in package.archive_entries:
+                            output.writestr("media", media_payload)
+                        for stored_name, _name, decoded in rebuilt_media:
+                            output.writestr(stored_name, _compress_anki21b(decoded))
+                    else:
+                        for stored_name, staged_path in package.pending_media.items():
+                            output.write(staged_path, stored_name)
             finally:
                 if database_path:
                     database_path.unlink(missing_ok=True)
@@ -1164,9 +1219,15 @@ def render_template(template: str, fields: list[Field], values: list[str], front
 def _strip_anki_controls(markup: str) -> str:
     markup = re.sub(r"{{[\^#][^}]+}}", "", markup)
     markup = re.sub(r"{{/[^}]+}}", "", markup)
-    # Keep the filename as a marker. The local API can replace it with the
-    # actual audio bytes from the APKG archive for the live preview.
-    markup = re.sub(r"\[sound:([^\]]+)\]", r"<span class='sound' data-sound='\1'>🔊 \1</span>", markup)
+
+    def replace_sound(match: re.Match[str]) -> str:
+        # Keep the source filename in a quoted attribute so the API can resolve
+        # it safely even when an Anki filename contains apostrophes or ampersands.
+        filename = match.group(1)
+        escaped = html.escape(filename, quote=True)
+        return f'<span class="sound" data-sound="{escaped}">🔊 {html.escape(filename)}</span>'
+
+    markup = re.sub(r"\[sound:([^\]]+)\]", replace_sound, markup, flags=re.IGNORECASE)
     return markup
 
 

@@ -3,12 +3,17 @@ from __future__ import annotations
 import tempfile
 import unittest
 import zipfile
+import json
 from importlib.util import find_spec
 from pathlib import Path
 
 from anki_helper.anki_package import (
     _safe_media_name,
     _unique_media_name,
+    _compress_anki21b,
+    _decompress_anki21b,
+    _encode_modern_media_index,
+    _protobuf_parts,
     create_package_from_table,
     decode_media_payload,
     export_bundle,
@@ -19,6 +24,7 @@ from anki_helper.anki_package import (
     media_reference_filename,
     media_items,
     read_apkg,
+    remove_media,
     render_template,
     save_apkg,
     split_field_content,
@@ -74,6 +80,49 @@ class MediaWorkflowTests(unittest.TestCase):
 
         self.assertEqual(original, decode_media_payload(compressed))
 
+    @unittest.skipIf(find_spec("zstandard") is None, "zstandard is required for modern Anki media")
+    def test_modern_package_media_changes_keep_anki_protobuf_format(self) -> None:
+        import_media(self.package, [self.asset], template_asset=True)
+        save_apkg(self.package, backup=False)
+        modern_source = self.root / "modern.apkg"
+        with zipfile.ZipFile(self.package.source) as source, zipfile.ZipFile(modern_source, "w", zipfile.ZIP_DEFLATED) as output:
+            database = source.read("collection.anki2")
+            badge = source.read("0")
+            output.writestr("collection.anki21b", _compress_anki21b(database))
+            output.writestr("media", _compress_anki21b(_encode_modern_media_index([("_badge.svg", badge)])))
+            output.writestr("0", _compress_anki21b(badge))
+
+        package = read_apkg(modern_source)
+        sound = self.root / "answer.mp3"
+        sound.write_bytes(b"complete audio payload")
+        import_media(package, [sound])
+        saved = self.root / "modern-saved.apkg"
+        save_apkg(package, saved, backup=False)
+
+        with zipfile.ZipFile(saved) as archive:
+            media_index = _decompress_anki21b(archive.read("media"))
+            with self.assertRaises((UnicodeDecodeError, json.JSONDecodeError)):
+                json.loads(media_index.decode("utf-8"))
+            entries = _protobuf_parts(media_index)[1]
+            names = [_protobuf_parts(entry)[1][0].decode("utf-8") for entry in entries]
+            self.assertEqual(["_badge.svg", "answer.mp3"], names)
+            self.assertTrue(archive.read("0").startswith(b"\x28\xb5\x2f\xfd"))
+            self.assertTrue(archive.read("1").startswith(b"\x28\xb5\x2f\xfd"))
+            self.assertEqual(badge, decode_media_payload(archive.read("0")))
+            self.assertEqual(b"complete audio payload", decode_media_payload(archive.read("1")))
+
+        reopened = read_apkg(saved)
+        self.assertEqual(["_badge.svg", "answer.mp3"], sorted(reopened.media.values()))
+
+        remove_media(reopened, "0")
+        trimmed = self.root / "modern-trimmed.apkg"
+        save_apkg(reopened, trimmed, backup=False)
+        trimmed_package = read_apkg(trimmed)
+        self.assertEqual({"0": "answer.mp3"}, trimmed_package.media)
+        with zipfile.ZipFile(trimmed) as archive:
+            self.assertEqual(b"complete audio payload", decode_media_payload(archive.read("0")))
+            self.assertNotIn("1", archive.namelist())
+
     def test_new_deck_template_includes_pending_media(self) -> None:
         import_media(self.package, [self.asset], template_asset=True)
         self.package.note_types[0].templates[0].front = '<img src="_badge.svg" alt="">{{Front}}'
@@ -96,7 +145,7 @@ class MediaWorkflowTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            "<div class='answer-sound'><span class='sound' data-sound='answer.mp3'>"
+            "<div class='answer-sound'><span class=\"sound\" data-sound=\"answer.mp3\">"
             "🔊 answer.mp3</span></div>",
             markup,
         )
@@ -141,6 +190,44 @@ class MediaWorkflowTests(unittest.TestCase):
 
         self.assertIn("class='replay-button anki-audio sound'", preview)
         self.assertIn("<svg viewBox='0 0 48 48'", preview)
+
+    @unittest.skipIf(backend is None, "FastAPI is required for backend preview tests")
+    def test_preview_resolves_quoted_sound_filenames_safely(self) -> None:
+        sound = self.root / "teacher's answer.mp3"
+        sound.write_bytes(b"audio")
+        item = import_media(self.package, [sound])[0]
+        markup = render_template(
+            "{{Back}}",
+            self.package.note_types[0].fields,
+            ["question", "[sound:teacher's answer.mp3]"],
+        )
+        previous_package = backend._package
+        backend._package = self.package
+        try:
+            preview = backend._embed_preview_media(markup)
+        finally:
+            backend._package = previous_package
+
+        self.assertIn(f"/api/media/{item['stored_name']}", preview)
+        self.assertEqual(1, preview.count("class='replay-button anki-audio sound'"))
+
+    @unittest.skipIf(backend is None, "FastAPI is required for backend media tests")
+    def test_media_response_has_stable_ranges_without_shared_cache(self) -> None:
+        payload = b"0123456789"
+        full = backend._media_response(payload, filename="answer.mp3")
+        partial = backend._media_response(payload, filename="answer.mp3", range_header="bytes=2-5")
+        suffix = backend._media_response(payload, filename="answer.mp3", range_header="bytes=-3")
+
+        self.assertEqual(payload, full.body)
+        self.assertEqual("audio/mpeg", full.media_type)
+        self.assertEqual("bytes", full.headers["accept-ranges"])
+        self.assertEqual("no-store", full.headers["cache-control"])
+        self.assertNotIn("content-disposition", full.headers)
+        self.assertEqual(full.headers["etag"], partial.headers["etag"])
+        self.assertEqual(206, partial.status_code)
+        self.assertEqual(b"2345", partial.body)
+        self.assertEqual("bytes 2-5/10", partial.headers["content-range"])
+        self.assertEqual(b"789", suffix.body)
 
     @unittest.skipIf(backend is None, "FastAPI is required for backend preview tests")
     def test_preview_resolves_dynamic_template_media_assignments(self) -> None:

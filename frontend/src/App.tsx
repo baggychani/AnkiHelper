@@ -1116,6 +1116,22 @@ function MediaPage({ onExport }: { onExport: () => void }) {
   const [video, setVideo] = useState<MediaItem | null>(null)
   const [error, setError] = useState('')
   const audioRef = useRef<HTMLAudioElement | null>(null)
+  const audioUrlRef = useRef<string | null>(null)
+  const playbackRequestRef = useRef(0)
+
+  const disposeAudio = useCallback(() => {
+    const audio = audioRef.current
+    audioRef.current = null
+    if (audio) {
+      audio.pause()
+      audio.removeAttribute('src')
+      audio.load()
+    }
+    if (audioUrlRef.current) {
+      URL.revokeObjectURL(audioUrlRef.current)
+      audioUrlRef.current = null
+    }
+  }, [])
 
   const load = useCallback(async () => {
     const loaded = await api.media()
@@ -1127,6 +1143,10 @@ function MediaPage({ onExport }: { onExport: () => void }) {
     window.setTimeout(() => found && document.getElementById(`media-${found.stored_name}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 80)
   }, [])
   useEffect(() => { void load().catch(() => setItems([])) }, [load])
+  useEffect(() => () => {
+    playbackRequestRef.current += 1
+    disposeAudio()
+  }, [disposeAudio])
 
   const inspect = async () => {
     setError('')
@@ -1145,14 +1165,48 @@ function MediaPage({ onExport }: { onExport: () => void }) {
       window.dispatchEvent(new CustomEvent('ankihelper:media-changed', { detail: result.workspace }))
     } catch (caught) { setError(caught instanceof Error ? caught.message : '미디어를 추가하지 못했습니다.') }
   }
-  const play = (item: MediaItem) => {
-    if (playing === item.stored_name && audioRef.current) { audioRef.current.pause(); setPlaying(''); return }
-    audioRef.current?.pause()
-    const audio = new Audio(api.mediaUrl(item.stored_name))
-    audioRef.current = audio
+  const play = async (item: MediaItem) => {
+    if (playing === item.stored_name) {
+      playbackRequestRef.current += 1
+      disposeAudio()
+      setPlaying('')
+      return
+    }
+    const requestId = playbackRequestRef.current + 1
+    playbackRequestRef.current = requestId
+    disposeAudio()
+    setError('')
     setPlaying(item.stored_name)
-    audio.onended = () => setPlaying('')
-    void audio.play().catch(() => setError('이 형식은 이 환경에서 재생할 수 없습니다.'))
+    try {
+      // Buffer the exact APKG payload before playback.  This avoids WebView
+      // range/cache races that can produce clicks or metallic edge artifacts.
+      const response = await fetch(api.mediaUrl(item.stored_name), { cache: 'no-store' })
+      if (!response.ok) throw new Error(`HTTP ${response.status}`)
+      const bytes = await response.arrayBuffer()
+      if (playbackRequestRef.current !== requestId) return
+      const objectUrl = URL.createObjectURL(new Blob([bytes], { type: response.headers.get('content-type') ?? 'application/octet-stream' }))
+      const audio = new Audio(objectUrl)
+      audio.preload = 'auto'
+      audioUrlRef.current = objectUrl
+      audioRef.current = audio
+      audio.onended = () => {
+        if (playbackRequestRef.current !== requestId) return
+        disposeAudio()
+        setPlaying('')
+      }
+      audio.onerror = () => {
+        if (playbackRequestRef.current !== requestId) return
+        disposeAudio()
+        setPlaying('')
+        setError('이 음성 파일을 현재 재생 환경에서 해석하지 못했습니다.')
+      }
+      await audio.play()
+    } catch {
+      if (playbackRequestRef.current !== requestId) return
+      disposeAudio()
+      setPlaying('')
+      setError('음성 파일을 온전히 불러오거나 재생하지 못했습니다.')
+    }
   }
   const remove = async (item: MediaItem) => {
     setError('')
@@ -1162,7 +1216,7 @@ function MediaPage({ onExport }: { onExport: () => void }) {
       const summary = references.length ? `\n\n현재 참조 ${references.length}곳:\n${references.slice(0, 3).map((reference) => `• ${reference.location}`).join('\n')}\n\n강제로 삭제하면 카드·디자인이 깨질 수 있습니다.` : ''
       if (!window.confirm(`‘${item.name}’을(를) 제거할까요? 저장하면 APKG에서도 삭제됩니다.${summary}`)) return
       const result = await api.deleteMedia(item.stored_name, references.length > 0)
-      audioRef.current?.pause(); setPlaying('')
+      playbackRequestRef.current += 1; disposeAudio(); setPlaying('')
       setItems((current) => current.filter((entry) => entry.stored_name !== item.stored_name))
       setHealth(null)
       window.dispatchEvent(new CustomEvent('ankihelper:media-changed', { detail: result.workspace }))
@@ -1275,7 +1329,8 @@ function DesignPage({ noteType, index, setIndex, onSave, notify }: { noteType?: 
 function PreviewPage({ noteType, side, setSide, noteIndex, setNoteIndex, previewHtml }: { noteType?: NoteType; side: 'front' | 'back'; setSide: (side: 'front' | 'back') => void; noteIndex: number; setNoteIndex: (index: number) => void; previewHtml: string }) {
   if (!noteType) return null
   const total = Math.max(noteType.notes.length, 1)
-  const doc = `<!doctype html><html><head><style>html,body{height:100%;margin:0}body{background:#fff}#anki-card{min-height:100%;box-sizing:border-box}</style></head><body class="card"><div id="anki-card" class="card">${previewHtml}</div><script>document.querySelectorAll('.anki-audio').forEach(b=>{let a;b.onclick=()=>{a??=new Audio(b.dataset.audio);if(a.paused){a.play();b.textContent='■';b.classList.add('playing')}else{a.pause();b.textContent='▶';b.classList.remove('playing')}a.onended=()=>{b.textContent='▶';b.classList.remove('playing')}}})</script></body></html>`
+  const audioScript = `<script>(()=>{let currentAudio=null,currentButton=null;const mark=(button,active)=>{button.classList.toggle('playing',active);button.setAttribute('aria-pressed',String(active))};document.querySelectorAll('.anki-audio').forEach(button=>{let audio;const finish=()=>{mark(button,false);if(currentAudio===audio){currentAudio=null;currentButton=null}};button.addEventListener('click',()=>{if(!audio){audio=new Audio(button.dataset.audio);audio.preload='auto';audio.onended=finish;audio.onerror=finish}if(currentAudio&&currentAudio!==audio){currentAudio.pause();currentAudio.currentTime=0;if(currentButton)mark(currentButton,false)}if(audio.paused){if(audio.ended)audio.currentTime=0;currentAudio=audio;currentButton=button;audio.play().then(()=>mark(button,true)).catch(finish)}else{audio.pause();finish()}})})})()</script>`
+  const doc = `<!doctype html><html><head><style>html,body{height:100%;margin:0}body{background:#fff}#anki-card{min-height:100%;box-sizing:border-box}</style></head><body class="card"><div id="anki-card" class="card">${previewHtml}</div>${audioScript}</body></html>`
   return <div className="mx-auto grid h-full min-h-[480px] max-w-[1420px] gap-3 lg:min-h-[620px] lg:grid-cols-[minmax(0,1fr)_230px] lg:gap-5 xl:grid-cols-[minmax(0,1fr)_250px]">
     <section className="grid min-h-0 place-items-center rounded-[20px] bg-[#172033] p-3 lg:rounded-[26px] lg:p-5">
       <div className="flex h-[min(72vh,710px)] max-h-full w-full max-w-[580px] flex-col overflow-hidden rounded-[24px] border-[6px] border-[#0a0f1d] bg-white shadow-2xl lg:rounded-[32px] lg:border-[7px]">

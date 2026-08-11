@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import tempfile
 import base64
+import hashlib
 import html
 import json
 import mimetypes
@@ -23,7 +24,7 @@ from urllib.parse import quote
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
@@ -79,7 +80,11 @@ app.add_middleware(
 _package: DeckPackage | None = None
 _selected_note_type_id: str | None = None
 _requires_save_as = False
-_sound_marker = re.compile(r"<span class='sound' data-sound='([^']+)'>.*?</span>")
+_sound_marker = re.compile(
+    r"<span class=(?P<class_quote>[\"'])sound(?P=class_quote)\s+"
+    r"data-sound=(?P<value_quote>[\"'])(?P<filename>.*?)(?P=value_quote)>.*?</span>",
+    re.DOTALL,
+)
 _replay_svg = (
     "<svg viewBox='0 0 48 48' aria-hidden='true'>"
     "<path d='M7 18h8l11-9v30l-11-9H7z'/>"
@@ -99,6 +104,7 @@ _srcset_attribute = re.compile(
     r"(?P<prefix>\bsrcset\s*=\s*)(?:(?P<quote>[\"'])(?P<quoted>.*?)(?P=quote)|(?P<bare>[^\s>]+))",
     re.IGNORECASE,
 )
+_byte_range = re.compile(r"bytes=(?P<start>\d*)-(?P<end>\d*)$")
 
 
 def _temporary_file_response(path: Path, *, filename: str, media_type: str) -> FileResponse:
@@ -109,6 +115,50 @@ def _temporary_file_response(path: Path, *, filename: str, media_type: str) -> F
         media_type=media_type,
         background=BackgroundTask(path.unlink, missing_ok=True),
     )
+
+
+def _media_response(data: bytes, *, filename: str, range_header: str | None = None) -> Response:
+    """Serve stable media bytes, including the single ranges used by players.
+
+    APKG entries may need decompression before they can be played.  Serving a
+    newly-created temporary file for every request changes its validators while
+    a browser is fetching byte ranges, and the shared /api/media/0 style URLs
+    can otherwise leak stale media between opened packages.
+    """
+    media_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+    size = len(data)
+    headers = {
+        "Accept-Ranges": "bytes",
+        "Cache-Control": "no-store",
+        "ETag": f'"{hashlib.sha256(data).hexdigest()}"',
+    }
+    if not range_header:
+        return Response(data, media_type=media_type, headers=headers)
+
+    match = _byte_range.fullmatch(range_header.strip())
+    if match is None or size == 0:
+        headers["Content-Range"] = f"bytes */{size}"
+        return Response(status_code=416, headers=headers)
+
+    start_text, end_text = match.group("start"), match.group("end")
+    if not start_text and not end_text:
+        headers["Content-Range"] = f"bytes */{size}"
+        return Response(status_code=416, headers=headers)
+    if start_text:
+        start = int(start_text)
+        end = int(end_text) if end_text else size - 1
+    else:
+        suffix_length = int(end_text)
+        if suffix_length <= 0:
+            headers["Content-Range"] = f"bytes */{size}"
+            return Response(status_code=416, headers=headers)
+        start, end = max(size - suffix_length, 0), size - 1
+    if start >= size or end < start:
+        headers["Content-Range"] = f"bytes */{size}"
+        return Response(status_code=416, headers=headers)
+    end = min(end, size - 1)
+    headers["Content-Range"] = f"bytes {start}-{end}/{size}"
+    return Response(data[start:end + 1], status_code=206, media_type=media_type, headers=headers)
 
 
 def _cleanup_ephemeral_package(package: DeckPackage | None, requires_save_as: bool) -> None:
@@ -362,7 +412,7 @@ def _embed_preview_media(markup: str, media_base_url: str = "http://127.0.0.1:87
         return f'{match.group("prefix")}"{", ".join(values)}"'
 
     def replace_sound(match: re.Match[str]) -> str:
-        filename = match.group(1)
+        filename = html.unescape(match.group("filename"))
         value = media_url(filename)
         if value is None:
             return f"<span class='sound'>🔊 {html.escape(filename)}</span>"
@@ -663,7 +713,7 @@ def delete_media(stored_name: str, force: bool = False) -> dict:
 
 
 @app.get("/api/media/{stored_name}")
-def download_media(stored_name: str) -> FileResponse:
+def download_media(stored_name: str, request: Request) -> Response:
     if _package is None:
         raise HTTPException(status_code=404, detail="먼저 APKG 파일을 열어주세요.")
     item = next((entry for entry in media_items(_package) if entry["stored_name"] == stored_name), None)
@@ -671,15 +721,11 @@ def download_media(stored_name: str) -> FileResponse:
         raise HTTPException(status_code=404, detail="미디어 파일을 찾지 못했습니다.")
     staged_path = _package.pending_media.get(stored_name)
     if staged_path and staged_path.is_file():
-        return FileResponse(staged_path, filename=item["name"], media_type=mimetypes.guess_type(item["name"])[0] or "application/octet-stream")
-    with zipfile.ZipFile(_package.source) as archive:
-        temporary = tempfile.NamedTemporaryFile(prefix="anki-helper-media-", suffix=Path(item["name"]).suffix, delete=False)
-        temporary.write(decode_media_payload(archive.read(stored_name))); temporary.close()
-    return _temporary_file_response(
-        Path(temporary.name),
-        filename=item["name"],
-        media_type=mimetypes.guess_type(item["name"])[0] or "application/octet-stream",
-    )
+        data = staged_path.read_bytes()
+    else:
+        with zipfile.ZipFile(_package.source) as archive:
+            data = decode_media_payload(archive.read(stored_name))
+    return _media_response(data, filename=item["name"], range_header=request.headers.get("range"))
 
 
 @app.post("/api/projects/import")
