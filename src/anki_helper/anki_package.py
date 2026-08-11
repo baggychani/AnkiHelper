@@ -172,6 +172,15 @@ def _decompress_anki21b(data: bytes) -> bytes:
         raise ApkgReadError("최신 Anki 컬렉션 압축을 해제하지 못했습니다.") from exc
 
 
+def decode_media_payload(data: bytes) -> bytes:
+    """Return a usable media payload from classic and modern Anki packages.
+
+    Recent Anki exports can store each numbered media entry as a Zstandard
+    frame, not only ``collection.anki21b`` and the media index.
+    """
+    return _decompress_anki21b(data) if data.startswith(b"\x28\xb5\x2f\xfd") else data
+
+
 def _read_media_map(archive: zipfile.ZipFile, entries: set[str]) -> dict[str, str]:
     if "media" not in entries:
         return {}
@@ -1203,7 +1212,7 @@ def _media_item(package: DeckPackage, stored_name: str, original_name: str, arch
 
 def _media_bytes(package: DeckPackage, stored_name: str, archive: zipfile.ZipFile) -> bytes:
     staged_path = package.pending_media.get(stored_name)
-    return staged_path.read_bytes() if staged_path else archive.read(stored_name)
+    return staged_path.read_bytes() if staged_path else decode_media_payload(archive.read(stored_name))
 
 
 def media_items(package: DeckPackage) -> list[dict[str, Any]]:

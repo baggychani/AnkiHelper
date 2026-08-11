@@ -56,6 +56,7 @@ from .anki_package import (
     save_as_note_type,
     split_field_content,
     create_package_from_table,
+    decode_media_payload,
 )
 
 app = FastAPI(title="Anki Helper local engine", docs_url=None, redoc_url=None)
@@ -316,7 +317,7 @@ def _embed_preview_media(markup: str, media_base_url: str = "http://127.0.0.1:87
                     return None
                 if archive is None:
                     archive = zipfile.ZipFile(_package.source)
-                payload = archive.read(stored_name)
+                payload = decode_media_payload(archive.read(stored_name))
             stylesheet = payload.decode("utf-8-sig")
             stylesheet = _css_import.sub(replace_css_import, stylesheet)
             stylesheet = _css_url.sub(replace_css_url, stylesheet)
@@ -664,7 +665,7 @@ def download_media(stored_name: str) -> FileResponse:
         return FileResponse(staged_path, filename=item["name"], media_type=mimetypes.guess_type(item["name"])[0] or "application/octet-stream")
     with zipfile.ZipFile(_package.source) as archive:
         temporary = tempfile.NamedTemporaryFile(prefix="anki-helper-media-", suffix=Path(item["name"]).suffix, delete=False)
-        temporary.write(archive.read(stored_name)); temporary.close()
+        temporary.write(decode_media_payload(archive.read(stored_name))); temporary.close()
     return _temporary_file_response(
         Path(temporary.name),
         filename=item["name"],

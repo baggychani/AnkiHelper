@@ -10,6 +10,7 @@ from anki_helper.anki_package import (
     _safe_media_name,
     _unique_media_name,
     create_package_from_table,
+    decode_media_payload,
     export_bundle,
     export_media,
     export_project,
@@ -62,6 +63,15 @@ class MediaWorkflowTests(unittest.TestCase):
         save_apkg(self.package, backup=False)
         reopened = read_apkg(self.package.source)
         self.assertEqual(["_badge.svg"], [item["name"] for item in media_items(reopened)])
+
+    @unittest.skipIf(find_spec("zstandard") is None, "zstandard is required for modern Anki media")
+    def test_modern_anki_compressed_media_payload_is_decoded(self) -> None:
+        import zstandard
+
+        original = b'<svg xmlns="http://www.w3.org/2000/svg"/>'
+        compressed = zstandard.ZstdCompressor().compress(original)
+
+        self.assertEqual(original, decode_media_payload(compressed))
 
     def test_new_deck_template_includes_pending_media(self) -> None:
         import_media(self.package, [self.asset], template_asset=True)
