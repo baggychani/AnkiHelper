@@ -23,6 +23,10 @@ from uuid import uuid4
 
 
 FIELD_TOKEN = re.compile(r"{{(?:#|\^)?\s*([^{}:#]+?)(?::[^{}]+)?\s*}}")
+CONDITIONAL_SECTION = re.compile(
+    r"{{(?P<kind>[#^])\s*(?P<name>[^{}:#]+?)\s*}}(?P<body>.*?){{/\s*(?P=name)\s*}}",
+    re.DOTALL,
+)
 MEDIA_TOKEN = re.compile(
     r"\[sound:[^\]]+\]|<img\b[^>]*>|<(?:audio|video)\b[^>]*>.*?</(?:audio|video)>",
     re.IGNORECASE | re.DOTALL,
@@ -1143,7 +1147,16 @@ def render_template(template: str, fields: list[Field], values: list[str], front
         # Preserve stored HTML but make plain TSV text readable in preview.
         return value.replace("\n", "<br>")
 
-    result = FIELD_TOKEN.sub(replace, template)
+    def replace_conditional(match: re.Match[str]) -> str:
+        has_value = bool(field_values.get(match.group("name").strip(), "").strip())
+        return match.group("body") if has_value == (match.group("kind") == "#") else ""
+
+    # Anki processes sections before ordinary field replacement.  Treating an
+    # opening {{#Field}} tag as {{Field}} duplicates the contents in previews.
+    result = template
+    while CONDITIONAL_SECTION.search(result):
+        result = CONDITIONAL_SECTION.sub(replace_conditional, result)
+    result = FIELD_TOKEN.sub(replace, result)
     result = result.replace("{{FrontSide}}", front_html)
     return _strip_anki_controls(result)
 

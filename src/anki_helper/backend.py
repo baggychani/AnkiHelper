@@ -80,6 +80,12 @@ _package: DeckPackage | None = None
 _selected_note_type_id: str | None = None
 _requires_save_as = False
 _sound_marker = re.compile(r"<span class='sound' data-sound='([^']+)'>.*?</span>")
+_replay_svg = (
+    "<svg viewBox='0 0 48 48' aria-hidden='true'>"
+    "<path d='M7 18h8l11-9v30l-11-9H7z'/>"
+    "<path d='M31 17c3 3 3 11 0 14M36 12c7 7 7 17 0 24' fill='none' "
+    "stroke='currentColor' stroke-width='4' stroke-linecap='round'/></svg>"
+)
 _preview_url_attribute = re.compile(
     r"(?P<prefix>\b(?:src|poster|href)\s*=\s*)(?:(?P<quote>[\"'])(?P<quoted>.*?)(?P=quote)|(?P<bare>[^\s>]+))",
     re.IGNORECASE,
@@ -360,7 +366,10 @@ def _embed_preview_media(markup: str, media_base_url: str = "http://127.0.0.1:87
         value = media_url(filename)
         if value is None:
             return f"<span class='sound'>🔊 {html.escape(filename)}</span>"
-        return f"<button type='button' class='anki-audio sound' data-audio='{value}' aria-label='음성 재생'>▶</button>"
+        return (
+            "<button type='button' class='replay-button anki-audio sound' "
+            f"data-audio='{value}' aria-label='음성 재생'>{_replay_svg}</button>"
+        )
 
     def runtime_resolver() -> str:
         """Map dynamic DOM media assignments before template scripts execute."""
@@ -902,7 +911,7 @@ def preview_card(
     template = note_type.templates[template_index]
     front = render_template(template.front, note_type.fields, values)
     body = front if side == "front" else render_template(template.back, note_type.fields, values, front)
-    helper_css = ".anki-audio{display:inline-grid;place-items:center;width:36px;height:36px;margin:0 0 0 10px;border:1px solid #f4b183;border-radius:999px;background:#fff7ef;color:#d44709;font:700 16px/1 system-ui,sans-serif;cursor:pointer;vertical-align:middle}.anki-audio.playing{background:#d44709;color:#fff}"
+    helper_css = ".anki-audio{cursor:pointer}.anki-audio:not(.replay-button){display:inline-grid;place-items:center;width:36px;height:36px;margin:0 0 0 10px;border:1px solid #f4b183;border-radius:999px;background:#fff7ef;color:#d44709;font:700 16px/1 system-ui,sans-serif}.anki-audio.playing:not(.replay-button){background:#d44709;color:#fff}"
     markup = f"<style>{helper_css}{note_type.css}</style>{body}"
     return {"html": _embed_preview_media(markup, str(request.base_url).rstrip("/"))}
 

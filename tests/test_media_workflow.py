@@ -19,6 +19,7 @@ from anki_helper.anki_package import (
     media_reference_filename,
     media_items,
     read_apkg,
+    render_template,
     save_apkg,
     split_field_content,
 )
@@ -87,6 +88,27 @@ class MediaWorkflowTests(unittest.TestCase):
         finally:
             created.source.unlink(missing_ok=True)
 
+    def test_template_sections_do_not_duplicate_sound_fields(self) -> None:
+        markup = render_template(
+            "{{#Back}}<div class='answer-sound'>{{Back}}</div>{{/Back}}",
+            self.package.note_types[0].fields,
+            ["question", "[sound:answer.mp3]"],
+        )
+
+        self.assertEqual(
+            "<div class='answer-sound'><span class='sound' data-sound='answer.mp3'>"
+            "🔊 answer.mp3</span></div>",
+            markup,
+        )
+        self.assertEqual(
+            "hidden",
+            render_template(
+                "{{#Back}}visible{{/Back}}{{^Back}}hidden{{/Back}}",
+                self.package.note_types[0].fields,
+                ["question", ""],
+            ),
+        )
+
     @unittest.skipIf(backend is None, "FastAPI is required for backend preview tests")
     def test_preview_embeds_pending_design_assets(self) -> None:
         import_media(self.package, [self.asset], template_asset=True)
@@ -102,6 +124,23 @@ class MediaWorkflowTests(unittest.TestCase):
         self.assertNotIn('src="_badge.svg"', preview)
         self.assertNotIn('url("_badge.svg")', preview)
         self.assertEqual(3, preview.count("http://127.0.0.1:8765/api/media/0"))
+
+    @unittest.skipIf(backend is None, "FastAPI is required for backend preview tests")
+    def test_preview_uses_anki_compatible_replay_button(self) -> None:
+        sound = self.root / "answer.mp3"
+        sound.write_bytes(b"audio")
+        import_media(self.package, [sound])
+        previous_package = backend._package
+        backend._package = self.package
+        try:
+            preview = backend._embed_preview_media(
+                "<span class='sound' data-sound='answer.mp3'>🔊 answer.mp3</span>"
+            )
+        finally:
+            backend._package = previous_package
+
+        self.assertIn("class='replay-button anki-audio sound'", preview)
+        self.assertIn("<svg viewBox='0 0 48 48'", preview)
 
     @unittest.skipIf(backend is None, "FastAPI is required for backend preview tests")
     def test_preview_resolves_dynamic_template_media_assignments(self) -> None:
