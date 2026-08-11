@@ -108,16 +108,16 @@ class MediaWorkflowTests(unittest.TestCase):
         self.assertLess(preview.index('patch(HTMLImageElement.prototype,"src")'), preview.index('image.src = filename'))
 
     @unittest.skipIf(backend is None, "FastAPI is required for backend preview tests")
-    def test_preview_preserves_card_storage_between_iframe_documents(self) -> None:
+    def test_preview_preserves_storage_between_iframe_documents(self) -> None:
         previous_package = backend._package
         backend._package = self.package
         try:
-            preview = backend._embed_preview_media("<div></div>", preview_key="type:0:7")
+            preview = backend._embed_preview_media("<div></div>")
         finally:
             backend._package = previous_package
 
-        self.assertIn('const previewKey="type:0:7"', preview)
         self.assertIn('host.__ankiHelperPreviewState', preview)
+        self.assertIn('states.storage', preview)
         self.assertIn('Storage.prototype.getItem=function', preview)
 
     @unittest.skipIf(backend is None, "FastAPI is required for backend preview tests")

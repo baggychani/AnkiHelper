@@ -323,7 +323,7 @@ class MainWindow(QMainWindow):
         self.notice = QLabel("", objectName="navDetail")
         self.notice.setWordWrap(True)
         layout.addWidget(self.notice)
-        self.version_label = QLabel("VERSION 1.4.0", objectName="navVersion")
+        self.version_label = QLabel("VERSION 1.4.1", objectName="navVersion")
         self.copyright_label = QLabel("© 2026 Bae Gichan", objectName="navCopyright")
         layout.addWidget(self.version_label)
         layout.addWidget(self.copyright_label)
