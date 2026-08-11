@@ -384,11 +384,25 @@ patch(HTMLImageElement.prototype,"src");
 patch(HTMLAudioElement.prototype,"src");
 patch(HTMLVideoElement.prototype,"src");
 patch(HTMLSourceElement.prototype,"src");
+patch(HTMLImageElement.prototype,"srcset");
+patch(HTMLVideoElement.prototype,"poster");
+patch(HTMLLinkElement.prototype,"href");
 const setAttribute=Element.prototype.setAttribute;
 Element.prototype.setAttribute=function(name,value){{
   const attribute=String(name).toLowerCase();
-  return setAttribute.call(this,name,attribute==="src"||attribute==="poster"?resolve(value):value);
+  return setAttribute.call(this,name,["src","srcset","poster","href"].includes(attribute)?resolve(value):value);
 }};
+const rewriteElement=element=>{{
+  if(!(element instanceof Element))return;
+  for(const name of ["src","srcset","poster","href"]){{
+    if(element.hasAttribute(name))element.setAttribute(name,resolve(element.getAttribute(name)));
+  }}
+  if(element.hasAttribute("style"))element.setAttribute("style",element.getAttribute("style").replace(/url\\((['\\"]?)(.*?)\\1\\)/g,(_match,quote,url)=>`url(${{quote}}${{resolve(url)}}${{quote}})`));
+  element.querySelectorAll?.("[src],[srcset],[poster],[href],[style]").forEach(rewriteElement);
+}};
+new MutationObserver(records=>records.forEach(record=>record.addedNodes.forEach(rewriteElement))).observe(document.documentElement,{{childList:true,subtree:true}});
+const originalFetch=window.fetch.bind(window);
+window.fetch=(input,...rest)=>originalFetch(typeof input==="string"?resolve(input):input,...rest);
 window.__ankiHelperResolveMediaUrl=resolve;
 }})();</script>"""
 

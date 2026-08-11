@@ -146,7 +146,7 @@ export const api = {
   deleteMedia: (storedName: string, force = false) => request<{ workspace: Workspace }>(`/api/media/${encodeURIComponent(storedName)}?force=${force}`, { method: 'DELETE' }),
   mediaUrl: (storedName: string) => `${base}/api/media/${encodeURIComponent(storedName)}`,
   importProject: (path: string) => request<{ workspace: Workspace; note_type_id: string }>('/api/projects/import', { method: 'POST', body: JSON.stringify({ path }) }),
-  preview: (noteTypeId: string, templateIndex: number, side: 'front' | 'back', noteIndex: number) =>
-    request<{ html: string }>(`/api/note-types/${noteTypeId}/preview?template_index=${templateIndex}&side=${side}&note_index=${noteIndex}`),
+  preview: (noteTypeId: string, templateIndex: number, side: 'front' | 'back', noteIndex: number, signal?: AbortSignal) =>
+    request<{ html: string }>(`/api/note-types/${noteTypeId}/preview?template_index=${templateIndex}&side=${side}&note_index=${noteIndex}`, { signal }),
   exportUrl: (kind: 'tsv' | 'design' | 'bundle' | 'media' | 'project', noteTypeId: string) => `${base}/api/note-types/${noteTypeId}/export/${kind}`,
 }

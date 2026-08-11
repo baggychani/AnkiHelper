@@ -39,6 +39,8 @@ HTML_STYLESHEET_HREF = re.compile(
 HTML_SRCSET = re.compile(r"\ssrcset\s*=\s*(?:[\"'](?P<quoted>.*?)[\"']|(?P<bare>[^\s>]+))", re.IGNORECASE)
 CSS_URL_REFERENCE = re.compile(r"url\(\s*(?:[\"'](?P<quoted>.*?)[\"']|(?P<bare>[^)\s]+))\s*\)", re.IGNORECASE)
 CSS_IMPORT_REFERENCE = re.compile(r"@import\s+(?:[\"'](?P<quoted>.*?)[\"']|url\(\s*[\"']?(?P<bare>[^)\s\"']+)[\"']?\s*\))", re.IGNORECASE)
+SCRIPT_CONTENT = re.compile(r"<script\b[^>]*>(?P<body>.*?)</script\s*>", re.IGNORECASE | re.DOTALL)
+SCRIPT_STRING = re.compile(r"(?P<quote>[\"'])(?P<value>(?:\\.|(?!\1).)*)(?P=quote)", re.DOTALL)
 WINDOWS_RESERVED_FILENAMES = {
     "CON", "PRN", "AUX", "NUL", *(f"COM{index}" for index in range(1, 10)), *(f"LPT{index}" for index in range(1, 10)),
 }
@@ -108,7 +110,7 @@ class TablePreview:
 class MediaReference:
     filename: str
     location: str
-    source: Literal["field", "template", "css"]
+    source: Literal["field", "template", "css", "script"]
 
 
 def read_apkg(path: str | Path) -> DeckPackage:
@@ -1318,16 +1320,18 @@ def media_reference_filename(value: str) -> str | None:
     return name if name and name not in {".", ".."} else None
 
 
-def _markup_media_values(markup: str) -> list[str]:
-    values = [match.group(1) for match in SOUND_REFERENCE.finditer(markup)]
+def _markup_media_values(markup: str) -> list[tuple[str, bool]]:
+    values = [(match.group(1), False) for match in SOUND_REFERENCE.finditer(markup)]
     for pattern in (HTML_MEDIA_ATTRIBUTE, HTML_STYLESHEET_HREF, HTML_SRCSET, CSS_URL_REFERENCE, CSS_IMPORT_REFERENCE):
         for match in pattern.finditer(markup):
             value = match.group("quoted") or match.group("bare")
             if value:
                 if pattern is HTML_SRCSET:
-                    values.extend(candidate.strip().split()[0] for candidate in value.split(",") if candidate.strip())
+                    values.extend((candidate.strip().split()[0], False) for candidate in value.split(",") if candidate.strip())
                 else:
-                    values.append(value)
+                    values.append((value, False))
+    for script in SCRIPT_CONTENT.finditer(markup):
+        values.extend((match.group("value"), True) for match in SCRIPT_STRING.finditer(script.group("body")))
     return values
 
 
@@ -1355,11 +1359,11 @@ def media_health(package: DeckPackage) -> dict[str, Any]:
     missing: list[MediaReference] = []
 
     def inspect(markup: str, location: str, source: Literal["field", "template", "css"]) -> None:
-        for raw in _markup_media_values(markup):
+        for raw, dynamic in _markup_media_values(markup):
             filename = media_reference_filename(raw)
             if filename is None:
                 continue
-            reference = MediaReference(filename=filename, location=location, source=source)
+            reference = MediaReference(filename=filename, location=location, source="script" if dynamic else source)
             actual_name = available.get(filename)
             if actual_name:
                 references.setdefault(actual_name, []).append(reference)

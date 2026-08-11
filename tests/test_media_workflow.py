@@ -154,6 +154,16 @@ class MediaWorkflowTests(unittest.TestCase):
         self.assertEqual("_missing.svg", report["missing"][0]["filename"])
         self.assertEqual(["unused.mp3"], [item["name"] for item in report["unused"]])
 
+    def test_media_health_recognizes_template_script_asset_names(self) -> None:
+        import_media(self.package, [self.asset], template_asset=True)
+        self.package.note_types[0].templates[0].front = '<script>const characters = ["_badge.svg"]</script>'
+
+        report = media_health(self.package)
+
+        self.assertIn("_badge.svg", report["references"])
+        self.assertEqual([], report["static_unreferenced"])
+        self.assertEqual("script", report["references"]["_badge.svg"][0]["source"])
+
     def test_import_normalizes_sync_unsafe_filename_and_case_collisions(self) -> None:
         self.assertEqual("a_b_.svg", _safe_media_name("a:b?.svg"))
         self.assertEqual("Badge-2.svg", _unique_media_name("Badge.svg", {"badge.svg"}))
