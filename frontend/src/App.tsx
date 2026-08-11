@@ -1280,7 +1280,7 @@ function PreviewPage({ noteType, side, setSide, noteIndex, setNoteIndex, preview
     <section className="grid min-h-0 place-items-center rounded-[20px] bg-[#172033] p-3 lg:rounded-[26px] lg:p-5">
       <div className="flex h-[min(72vh,710px)] max-h-full w-full max-w-[580px] flex-col overflow-hidden rounded-[24px] border-[6px] border-[#0a0f1d] bg-white shadow-2xl lg:rounded-[32px] lg:border-[7px]">
         <div className="flex h-11 shrink-0 items-center justify-between border-b px-5 text-[11px] text-slate-400"><span className="h-2 w-2 rounded-full bg-emerald-400" /><b>ANKI 미리보기</b><span>{noteIndex + 1} / {total}</span></div>
-        <iframe key={`preview:${noteIndex}:${side}`} title="카드 미리보기" sandbox="allow-scripts allow-same-origin" srcDoc={doc} className="h-full w-full border-0" />
+        <iframe title="카드 미리보기" sandbox="allow-scripts allow-same-origin" srcDoc={doc} className="h-full w-full border-0" />
       </div>
     </section>
     <aside className="flex min-h-[170px] flex-col rounded-[18px] border border-slate-200/70 bg-white p-4 shadow-card lg:rounded-[22px] lg:p-5">
