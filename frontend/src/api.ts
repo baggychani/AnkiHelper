@@ -130,6 +130,8 @@ export const api = {
   savePackage: (path?: string) =>
     request<{ workspace: Workspace; saved_to: string; backup: string | null }>('/api/packages/save', { method: 'POST', body: JSON.stringify({ path: path ?? null }) }),
   media: () => request<MediaItem[]>('/api/media'),
+  importMedia: (paths: string[], templateAsset = false) => request<{ workspace: Workspace; items: MediaItem[] }>('/api/media/import', { method: 'POST', body: JSON.stringify({ paths, template_asset: templateAsset }) }),
+  deleteMedia: (storedName: string) => request<{ workspace: Workspace }>(`/api/media/${encodeURIComponent(storedName)}`, { method: 'DELETE' }),
   mediaUrl: (storedName: string) => `${base}/api/media/${encodeURIComponent(storedName)}`,
   importProject: (path: string) => request<{ workspace: Workspace; note_type_id: string }>('/api/projects/import', { method: 'POST', body: JSON.stringify({ path }) }),
   preview: (noteTypeId: string, templateIndex: number, side: 'front' | 'back', noteIndex: number) =>

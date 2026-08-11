@@ -58,6 +58,8 @@ class DeckPackage:
     note_ids: dict[str, list[int]]
     removed_note_type_ids: list[str] = field(default_factory=list)
     display_name: str | None = None
+    pending_media: dict[str, Path] = field(default_factory=dict)
+    removed_media: set[str] = field(default_factory=set)
 
 
 class ApkgReadError(RuntimeError):
@@ -823,10 +825,19 @@ def save_apkg(package: DeckPackage, destination: str | Path | None = None, *, ba
                 if package.database_name.endswith(".anki21b"):
                     updated_database = _compress_anki21b(updated_database)
                 temp_output = target.with_suffix(target.suffix + ".tmp")
+                media_payload = json.dumps(package.media, ensure_ascii=False).encode("utf-8")
+                if "media" in package.archive_entries and source_archive.read("media").startswith(b"\x28\xb5\x2f\xfd"):
+                    media_payload = _compress_anki21b(media_payload)
                 with zipfile.ZipFile(temp_output, "w", zipfile.ZIP_DEFLATED) as output:
                     for item in source_archive.infolist():
-                        payload = updated_database if item.filename == package.database_name else source_archive.read(item.filename)
+                        if item.filename in package.removed_media:
+                            continue
+                        payload = updated_database if item.filename == package.database_name else media_payload if item.filename == "media" else source_archive.read(item.filename)
                         output.writestr(item, payload)
+                    if "media" not in package.archive_entries:
+                        output.writestr("media", media_payload)
+                    for stored_name, staged_path in package.pending_media.items():
+                        output.write(staged_path, stored_name)
             finally:
                 if database_path:
                     database_path.unlink(missing_ok=True)
@@ -839,6 +850,10 @@ def save_apkg(package: DeckPackage, destination: str | Path | None = None, *, ba
         raise
     if target.resolve() == package.source.resolve():
         package.source = target
+    for staged_path in package.pending_media.values():
+        staged_path.unlink(missing_ok=True)
+    package.pending_media.clear()
+    package.removed_media.clear()
     return target, backup_path
 
 
@@ -962,13 +977,13 @@ def create_package_from_table(
             connection.close()
         with zipfile.ZipFile(temporary.name, "w", zipfile.ZIP_DEFLATED) as archive:
             archive.write(database, "collection.anki2")
-            media = template_package.media if template_package else {}
+            template_media = media_items(template_package) if template_package else []
+            media = {item["stored_name"]: item["name"] for item in template_media}
             archive.writestr("media", json.dumps(media, ensure_ascii=False))
-            if template_package and media:
+            if template_package and template_media:
                 with zipfile.ZipFile(template_package.source) as source_archive:
-                    for stored_name in media:
-                        if stored_name in template_package.archive_entries:
-                            archive.writestr(stored_name, source_archive.read(stored_name))
+                    for item in template_media:
+                        archive.writestr(item["stored_name"], _media_bytes(template_package, item["stored_name"], source_archive))
     finally:
         database.unlink(missing_ok=True)
     package = read_apkg(temporary.name)
@@ -1127,23 +1142,118 @@ def export_design(note_type: NoteType, destination: str | Path) -> Path:
     return target
 
 
+def _media_type(name: str) -> Literal["audio", "image", "other"]:
+    suffix = Path(name).suffix.lower()
+    if suffix in {".mp3", ".wav", ".ogg", ".m4a", ".flac"}:
+        return "audio"
+    if suffix in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"}:
+        return "image"
+    return "other"
+
+
+def _media_item(package: DeckPackage, stored_name: str, original_name: str, archive: zipfile.ZipFile | None = None) -> dict[str, Any] | None:
+    if stored_name in package.removed_media:
+        return None
+    staged_path = package.pending_media.get(stored_name)
+    if staged_path:
+        if not staged_path.is_file():
+            return None
+        size = staged_path.stat().st_size
+    else:
+        if archive is None or stored_name not in package.archive_entries:
+            return None
+        size = archive.getinfo(stored_name).file_size
+    return {"name": original_name, "stored_name": stored_name, "size": size, "type": _media_type(original_name)}
+
+
+def _media_bytes(package: DeckPackage, stored_name: str, archive: zipfile.ZipFile) -> bytes:
+    staged_path = package.pending_media.get(stored_name)
+    return staged_path.read_bytes() if staged_path else archive.read(stored_name)
+
+
 def media_items(package: DeckPackage) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     with zipfile.ZipFile(package.source) as archive:
         for stored_name, original_name in package.media.items():
-            if stored_name not in package.archive_entries:
-                continue
-            info = archive.getinfo(stored_name)
-            media_type = "audio" if Path(original_name).suffix.lower() in {".mp3", ".wav", ".ogg", ".m4a", ".flac"} else "image" if Path(original_name).suffix.lower() in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"} else "other"
-            items.append({"name": original_name, "stored_name": stored_name, "size": info.file_size, "type": media_type})
+            item = _media_item(package, stored_name, original_name, archive)
+            if item:
+                items.append(item)
     return sorted(items, key=lambda item: item["name"].casefold())
+
+
+def _safe_media_name(name: str) -> str:
+    clean = Path(name).name.strip()
+    if not clean or clean in {".", ".."}:
+        raise ValueError("미디어 파일 이름을 확인할 수 없습니다.")
+    return clean
+
+
+def _unique_media_name(name: str, used: set[str]) -> str:
+    if name not in used:
+        return name
+    stem, suffix = Path(name).stem, Path(name).suffix
+    counter = 2
+    while f"{stem}-{counter}{suffix}" in used:
+        counter += 1
+    return f"{stem}-{counter}{suffix}"
+
+
+def _next_media_stored_name(package: DeckPackage) -> str:
+    numeric_names = [int(name) for name in package.media if name.isdigit()]
+    return str(max(numeric_names, default=-1) + 1)
+
+
+def import_media(package: DeckPackage, paths: list[str | Path], *, template_asset: bool = False) -> list[dict[str, Any]]:
+    """Stage local files so the next APKG save embeds them as Anki media."""
+    staged: list[tuple[str, str, Path]] = []
+    used_names = set(package.media.values())
+    next_stored_name = int(_next_media_stored_name(package))
+    try:
+        for raw_path in paths:
+            source = Path(raw_path)
+            if not source.is_file():
+                raise ValueError(f"미디어 파일을 찾을 수 없습니다: {source.name or source}")
+            name = _safe_media_name(source.name)
+            if template_asset:
+                name = "_" + name.lstrip("_")
+            name = _unique_media_name(name, used_names)
+            used_names.add(name)
+            temporary = tempfile.NamedTemporaryFile(prefix="anki-helper-media-", suffix=source.suffix, delete=False)
+            temporary.close()
+            staged_path = Path(temporary.name)
+            try:
+                shutil.copyfile(source, staged_path)
+            except OSError:
+                staged_path.unlink(missing_ok=True)
+                raise
+            staged.append((str(next_stored_name), name, staged_path))
+            next_stored_name += 1
+    except Exception:
+        for _stored_name, _name, staged_path in staged:
+            staged_path.unlink(missing_ok=True)
+        raise
+    for stored_name, name, staged_path in staged:
+        package.media[stored_name] = name
+        package.pending_media[stored_name] = staged_path
+    return [item for stored_name, name, _staged_path in staged if (item := _media_item(package, stored_name, name))]
+
+
+def remove_media(package: DeckPackage, stored_name: str) -> None:
+    if stored_name not in package.media:
+        raise ValueError("미디어 파일을 찾을 수 없습니다.")
+    staged_path = package.pending_media.pop(stored_name, None)
+    if staged_path:
+        staged_path.unlink(missing_ok=True)
+    elif stored_name in package.archive_entries:
+        package.removed_media.add(stored_name)
+    del package.media[stored_name]
 
 
 def export_media(package: DeckPackage, destination: str | Path) -> Path:
     target = Path(destination)
     with zipfile.ZipFile(package.source) as source, zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as output:
         for item in media_items(package):
-            output.writestr(f"media/{item['name']}", source.read(item["stored_name"]))
+            output.writestr(f"media/{item['name']}", _media_bytes(package, item["stored_name"], source))
     return target
 
 
@@ -1181,7 +1291,7 @@ def export_project(package: DeckPackage, note_type: NoteType, destination: str |
             output.writestr(f"models/{safe_model}/card_{index}_back.html", template.back)
         with zipfile.ZipFile(package.source) as source:
             for item in media_items(package):
-                output.writestr(f"media/{item['name']}", source.read(item["stored_name"]))
+                output.writestr(f"media/{item['name']}", _media_bytes(package, item["stored_name"], source))
     return target
 
 
@@ -1224,7 +1334,6 @@ def export_bundle(package: DeckPackage, note_type: NoteType, destination: str | 
         with zipfile.ZipFile(package.source) as source_archive, zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as output:
             output.write(folder / "input.tsv", "input.tsv")
             output.write(folder / "design.json", "design.json")
-            for stored_name, original_name in package.media.items():
-                if stored_name in package.archive_entries:
-                    output.writestr(f"media/{original_name}", source_archive.read(stored_name))
+            for item in media_items(package):
+                output.writestr(f"media/{item['name']}", _media_bytes(package, item["stored_name"], source_archive))
     return target

@@ -37,11 +37,13 @@ from .anki_package import (
     export_tsv,
     field_content_kind,
     import_project,
+    import_media,
     inspect_table_source,
     media_items,
     move_note_field_contents,
     move_notes_between_types,
     read_apkg,
+    remove_media,
     remove_note_type,
     render_template,
     reorder_field,
@@ -86,7 +88,12 @@ def _temporary_file_response(path: Path, *, filename: str, media_type: str) -> F
 
 def _cleanup_ephemeral_package(package: DeckPackage | None, requires_save_as: bool) -> None:
     """Remove only package copies that this process staged in the temp directory."""
-    if package is None or not requires_save_as:
+    if package is None:
+        return
+    for staged_path in package.pending_media.values():
+        staged_path.unlink(missing_ok=True)
+    package.pending_media.clear()
+    if not requires_save_as:
         return
     source = package.source
     try:
@@ -147,6 +154,11 @@ class FieldReorder(BaseModel):
 
 class SavePackageRequest(BaseModel):
     path: str | None = None
+
+
+class MediaImportRequest(BaseModel):
+    paths: list[str]
+    template_asset: bool = False
 
 
 class ImportProjectRequest(BaseModel):
@@ -435,6 +447,30 @@ def list_media() -> list[dict]:
     return media_items(_package)
 
 
+@app.post("/api/media/import")
+def add_media(payload: MediaImportRequest) -> dict:
+    if _package is None:
+        raise HTTPException(status_code=404, detail="먼저 APKG 파일을 열어주세요.")
+    if not payload.paths:
+        raise HTTPException(status_code=400, detail="추가할 미디어 파일을 선택해주세요.")
+    try:
+        added = import_media(_package, payload.paths, template_asset=payload.template_asset)
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"workspace": _workspace_data(), "items": added}
+
+
+@app.delete("/api/media/{stored_name}")
+def delete_media(stored_name: str) -> dict:
+    if _package is None:
+        raise HTTPException(status_code=404, detail="먼저 APKG 파일을 열어주세요.")
+    try:
+        remove_media(_package, stored_name)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"workspace": _workspace_data()}
+
+
 @app.get("/api/media/{stored_name}")
 def download_media(stored_name: str) -> FileResponse:
     if _package is None:
@@ -442,6 +478,9 @@ def download_media(stored_name: str) -> FileResponse:
     item = next((entry for entry in media_items(_package) if entry["stored_name"] == stored_name), None)
     if item is None:
         raise HTTPException(status_code=404, detail="미디어 파일을 찾지 못했습니다.")
+    staged_path = _package.pending_media.get(stored_name)
+    if staged_path and staged_path.is_file():
+        return FileResponse(staged_path, filename=item["name"], media_type=mimetypes.guess_type(item["name"])[0] or "application/octet-stream")
     with zipfile.ZipFile(_package.source) as archive:
         temporary = tempfile.NamedTemporaryFile(prefix="anki-helper-media-", suffix=Path(item["name"]).suffix, delete=False)
         temporary.write(archive.read(stored_name)); temporary.close()

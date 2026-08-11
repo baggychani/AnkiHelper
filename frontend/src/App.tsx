@@ -8,7 +8,7 @@ import {
   ArrowLeft, ArrowRight, ArrowRightLeft, BookOpen, Braces, Check, ChevronDown, ChevronRight, ChevronUp, Code2, Copy,
   ArrowUpRight, Database, Download, FileArchive, FolderOpen, Grid2X2, HardDrive,
   FileSpreadsheet, Image, Layers3, ListChecks, LoaderCircle, LogOut, Music2, Palette, PanelLeft,
-  Play, Plus, Save, Sparkles, Table2, Trash2, Type, X,
+  Play, Plus, RotateCcw, Save, Sparkles, Table2, Trash2, Type, X,
 } from 'lucide-react'
 import { api, type Field, type MediaItem, type NoteType, type SourceNoteType, type TablePreview, type Workspace } from './api'
 
@@ -195,6 +195,11 @@ function App() {
     window.addEventListener('ankihelper:saved', saved)
     return () => window.removeEventListener('ankihelper:saved', saved)
   }, [hydrate, notify])
+  useEffect(() => {
+    const mediaChanged = (event: Event) => { hydrate((event as CustomEvent<Workspace>).detail); setDirty(true) }
+    window.addEventListener('ankihelper:media-changed', mediaChanged)
+    return () => window.removeEventListener('ankihelper:media-changed', mediaChanged)
+  }, [hydrate])
   useEffect(() => {
     if (!selected?.templates.length) return
     const timer = window.setTimeout(() => api.preview(selected.id, templateIndex, side, noteIndex).then(({ html }) => setPreviewHtml(html)).catch(() => undefined), 100)
@@ -1103,16 +1108,42 @@ function MediaPage({ onExport }: { onExport: () => void }) {
   const [query, setQuery] = useState('')
   const [playing, setPlaying] = useState('')
   const [highlight, setHighlight] = useState('')
+  const [error, setError] = useState('')
   const audioRef = useRef<HTMLAudioElement | null>(null)
   useEffect(() => { api.media().then((loaded) => { setItems(loaded); const focus = sessionStorage.getItem('ankihelper:media-focus'); if (focus) { const found = loaded.find((item) => item.name === focus); setHighlight(focus); sessionStorage.removeItem('ankihelper:media-focus'); window.setTimeout(() => found && document.getElementById(`media-${found.stored_name}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 80); window.setTimeout(() => setHighlight(''), 2400) } }).catch(() => setItems([])) }, [])
   const visible = items.filter((item) => item.name.toLowerCase().includes(query.toLowerCase()))
   const play = (item: MediaItem) => { if (playing === item.stored_name && audioRef.current) { audioRef.current.pause(); setPlaying(''); return } audioRef.current?.pause(); const audio = new Audio(api.mediaUrl(item.stored_name)); audioRef.current = audio; setPlaying(item.stored_name); audio.onended = () => setPlaying(''); void audio.play() }
   const downloadOne = async (item: MediaItem) => { const destination = await save({ defaultPath: item.name, filters: [{ name: '미디어 파일', extensions: [item.name.split('.').pop() || '*'] }] }); if (!destination) return; const response = await fetch(api.mediaUrl(item.stored_name)); await writeFile(destination, new Uint8Array(await response.arrayBuffer())) }
+  const addFiles = async (templateAsset: boolean) => {
+    const selected = await open({ multiple: true })
+    const paths = selected === null ? [] : Array.isArray(selected) ? selected : [selected]
+    if (!paths.length) return
+    setError('')
+    try {
+      const result = await api.importMedia(paths, templateAsset)
+      setItems((current) => [...current, ...result.items].sort((left, right) => left.name.localeCompare(right.name)))
+      window.dispatchEvent(new CustomEvent('ankihelper:media-changed', { detail: result.workspace }))
+    } catch (caught) { setError(caught instanceof Error ? caught.message : '미디어를 추가하지 못했습니다.') }
+  }
+  const remove = async (item: MediaItem) => {
+    if (!window.confirm(`‘${item.name}’을(를) 제거할까요? 저장하면 APKG에서도 삭제됩니다.`)) return
+    setError('')
+    try {
+      const result = await api.deleteMedia(item.stored_name)
+      audioRef.current?.pause(); setPlaying('')
+      setItems((current) => current.filter((entry) => entry.stored_name !== item.stored_name))
+      window.dispatchEvent(new CustomEvent('ankihelper:media-changed', { detail: result.workspace }))
+    } catch (caught) { setError(caught instanceof Error ? caught.message : '미디어를 제거하지 못했습니다.') }
+  }
+  const copyReference = async (item: MediaItem) => {
+    const reference = item.type === 'image' ? `<img src="${item.name}" alt="">` : item.type === 'audio' ? `[sound:${item.name}]` : item.name
+    await navigator.clipboard.writeText(reference)
+  }
   const audioCount = items.filter((item) => item.type === 'audio').length
   const imageCount = items.filter((item) => item.type === 'image').length
   return <div className="mx-auto flex h-full min-h-0 max-w-[1420px] flex-col gap-4">
-    <div className="flex shrink-0 flex-wrap items-center gap-x-5 gap-y-2 rounded-2xl border border-slate-200/70 bg-white px-5 py-3 text-xs shadow-card"><b className="text-sm text-slate-700">미디어 {items.length.toLocaleString()}개</b><span className="inline-flex items-center gap-1.5 text-slate-500"><Music2 size={14} className="text-violet-500" />음성 {audioCount.toLocaleString()}</span><span className="inline-flex items-center gap-1.5 text-slate-500"><Image size={14} className="text-cyan-500" />이미지 {imageCount.toLocaleString()}</span></div>
-    <section className="flex min-h-0 flex-1 flex-col rounded-[18px] border border-slate-200/70 bg-white p-4 shadow-card lg:rounded-[22px] lg:p-5"><h3 className="mb-4 shrink-0 text-lg font-semibold">미디어 확인</h3><div className="mb-4 flex shrink-0 gap-2"><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="파일명 검색" className="min-w-0 flex-1 rounded-xl border border-slate-200 px-3 py-2.5 text-sm outline-none" /><button onClick={onExport} className="inline-flex items-center gap-2 rounded-xl bg-[#151d31] px-4 text-sm font-semibold text-white"><Download size={15} />전체 추출</button></div><div className="min-h-0 flex-1 overflow-y-auto rounded-xl border border-slate-200">{visible.map((item) => <div id={`media-${item.stored_name}`} key={item.stored_name} className={`flex items-center gap-3 border-b px-4 py-3 transition-colors duration-700 last:border-0 ${highlight === item.name ? 'border-violet-200 bg-violet-100 ring-2 ring-inset ring-violet-300' : 'border-slate-100 bg-white'}`}>{item.type === 'image' ? <img src={api.mediaUrl(item.stored_name)} className="h-10 w-10 rounded-lg bg-slate-100 object-cover" /> : <span className="grid h-10 w-10 place-items-center rounded-lg bg-violet-100 text-violet-600"><Music2 size={17} /></span>}<span className="min-w-0 flex-1 truncate text-sm font-medium" title={item.name}>{item.name}</span>{item.type === 'audio' && <button onClick={() => play(item)} className={`inline-flex h-9 items-center gap-2 rounded-lg px-3 text-xs font-semibold ${playing === item.stored_name ? 'bg-violet-600 text-white' : 'bg-violet-50 text-violet-700'}`}>{playing === item.stored_name ? '■ 정지' : '▶ 듣기'}</button>}<button onClick={() => void downloadOne(item)} className="inline-flex h-9 items-center gap-2 rounded-lg border border-slate-200 px-3 text-xs font-semibold text-slate-600"><Download size={14} />저장</button></div>)}</div></section>
+    <div className="flex shrink-0 flex-wrap items-center gap-x-5 gap-y-2 rounded-2xl border border-slate-200/70 bg-white px-5 py-3 text-xs shadow-card"><b className="text-sm text-slate-700">미디어 {items.length.toLocaleString()}개</b><span className="inline-flex items-center gap-1.5 text-slate-500"><Music2 size={14} className="text-violet-500" />음성 {audioCount.toLocaleString()}</span><span className="inline-flex items-center gap-1.5 text-slate-500"><Image size={14} className="text-cyan-500" />이미지 {imageCount.toLocaleString()}</span><span className="text-slate-400">추가·삭제 내용은 상단 APKG 저장 시 반영됩니다.</span></div>
+    <section className="flex min-h-0 flex-1 flex-col rounded-[18px] border border-slate-200/70 bg-white p-4 shadow-card lg:rounded-[22px] lg:p-5"><div className="mb-4 flex shrink-0 flex-wrap items-center justify-between gap-3"><div><h3 className="text-lg font-semibold">미디어 관리</h3><p className="mt-1 text-xs text-slate-400">디자인용 추가는 파일명 앞에 <code>_</code>를 붙여 카드 템플릿에서 안전하게 사용할 수 있습니다.</p></div><div className="flex flex-wrap gap-2"><button onClick={() => void addFiles(false)} className="inline-flex h-10 items-center gap-2 rounded-xl border border-slate-200 px-3 text-xs font-semibold text-slate-700 transition hover:bg-slate-50"><Plus size={15} />파일 추가</button><button onClick={() => void addFiles(true)} className="inline-flex h-10 items-center gap-2 rounded-xl bg-indigo-600 px-3 text-xs font-semibold text-white shadow-lg shadow-indigo-500/20 transition hover:bg-indigo-700"><Palette size={15} />디자인용 추가</button></div></div><div className="mb-3 flex shrink-0 gap-2"><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="파일명 검색" className="min-w-0 flex-1 rounded-xl border border-slate-200 px-3 py-2.5 text-sm outline-none" /><button onClick={onExport} className="inline-flex items-center gap-2 rounded-xl bg-[#151d31] px-4 text-sm font-semibold text-white"><Download size={15} />전체 추출</button></div>{error && <p className="mb-3 rounded-xl bg-rose-50 px-3 py-2 text-xs font-medium text-rose-700">{error}</p>}<div className="min-h-0 flex-1 overflow-y-auto rounded-xl border border-slate-200">{visible.length === 0 ? <div className="grid h-full min-h-40 place-items-center px-4 text-center text-sm text-slate-400">추가한 이미지, 음성, 폰트 파일이 여기에 표시됩니다.</div> : visible.map((item) => <div id={`media-${item.stored_name}`} key={item.stored_name} className={`flex flex-wrap items-center gap-3 border-b px-4 py-3 transition-colors duration-700 last:border-0 ${highlight === item.name ? 'border-violet-200 bg-violet-100 ring-2 ring-inset ring-violet-300' : 'border-slate-100 bg-white'}`}>{item.type === 'image' ? <img src={api.mediaUrl(item.stored_name)} className="h-10 w-10 rounded-lg bg-slate-100 object-cover" /> : <span className="grid h-10 w-10 place-items-center rounded-lg bg-violet-100 text-violet-600"><Music2 size={17} /></span>}<span className="min-w-0 flex-1 truncate text-sm font-medium" title={item.name}>{item.name}</span>{item.type === 'audio' && <button onClick={() => play(item)} className={`inline-flex h-9 items-center gap-2 rounded-lg px-3 text-xs font-semibold ${playing === item.stored_name ? 'bg-violet-600 text-white' : 'bg-violet-50 text-violet-700'}`}>{playing === item.stored_name ? '■ 정지' : '▶ 듣기'}</button>}<button onClick={() => void copyReference(item)} className="inline-flex h-9 items-center gap-2 rounded-lg border border-slate-200 px-3 text-xs font-semibold text-slate-600"><Copy size={14} />{item.type === 'other' ? '이름 복사' : '태그 복사'}</button><button onClick={() => void downloadOne(item)} className="inline-flex h-9 items-center gap-2 rounded-lg border border-slate-200 px-3 text-xs font-semibold text-slate-600"><Download size={14} />저장</button><button onClick={() => void remove(item)} className="inline-flex h-9 items-center gap-2 rounded-lg px-3 text-xs font-semibold text-rose-600 transition hover:bg-rose-50"><Trash2 size={14} />삭제</button></div>)}</div></section>
   </div>
 }
 function formatSize(bytes: number) { if (bytes < 1024) return `${bytes} B`; if (bytes < 1048576) return `${(bytes / 1024).toFixed(1)} KB`; return `${(bytes / 1048576).toFixed(1)} MB` }
@@ -1121,18 +1152,20 @@ function highlightCode(value: string, mode: EditorMode) { const pattern = mode =
 
 function DesignPage({ noteType, index, setIndex, onSave, notify }: { noteType?: NoteType; index: number; setIndex: (index: number) => void; onSave: (mode: EditorMode, value: string) => Promise<void>; notify: (message: string) => void }) {
   const [mode, setMode] = useState<EditorMode>('front')
-  const [draft, setDraft] = useState('')
-  const [changed, setChanged] = useState(false)
+  const [drafts, setDrafts] = useState<Record<string, string>>({})
   const codeLayer = useRef<HTMLPreElement | null>(null)
   const template = noteType?.templates[index]
   const value = mode === 'css' ? noteType?.css ?? '' : template?.[mode] ?? ''
-  useEffect(() => { setDraft(value); setChanged(false) }, [value, mode, index])
+  const draftKey = `${noteType?.id ?? ''}:${index}:${mode}`
+  const draft = drafts[draftKey] ?? value
+  const changed = draft !== value
+  const updateDraft = (nextValue: string) => setDrafts((current) => ({ ...current, [draftKey]: nextValue }))
+  const discardDraft = () => setDrafts(({ [draftKey]: _discarded, ...remaining }) => remaining)
   const apply = useCallback(async () => {
     if (!changed) return
     await onSave(mode, draft)
-    window.dispatchEvent(new CustomEvent('ankihelper:request-save'))
-    setChanged(false)
-  }, [changed, draft, mode, onSave])
+    discardDraft()
+  }, [changed, draft, draftKey, mode, onSave])
   useEffect(() => {
     const handler = (event: KeyboardEvent) => { if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') { event.preventDefault(); void apply() } }
     window.addEventListener('keydown', handler)
@@ -1142,8 +1175,8 @@ function DesignPage({ noteType, index, setIndex, onSave, notify }: { noteType?: 
   return <div className="mx-auto grid h-full max-w-[1420px] min-h-0 grid-rows-[auto_minmax(0,1fr)] gap-3 lg:grid-cols-[220px_minmax(0,1fr)] lg:grid-rows-1 lg:gap-5 xl:grid-cols-[240px_minmax(0,1fr)]">
     <aside className="max-h-[142px] overflow-y-auto rounded-[18px] border border-slate-200/70 bg-white p-3 shadow-card lg:max-h-none lg:rounded-[22px]"><h2 className="px-2 pb-3 pt-2 text-base font-semibold">카드 레이아웃</h2>{noteType.templates.map((item, itemIndex) => <button key={itemIndex} onClick={() => setIndex(itemIndex)} className={`mb-1 flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left text-sm ${itemIndex === index ? 'bg-[#151d31] text-white' : 'hover:bg-slate-50'}`}><span className="text-xs font-bold">{String(itemIndex + 1).padStart(2, '0')}</span>{item.name}</button>)}</aside>
     <section className="flex min-h-0 flex-col overflow-hidden rounded-[22px] border border-slate-200/70 bg-white shadow-card">
-      <div className="flex shrink-0 items-center justify-between border-b border-slate-100 p-4"><div className="flex gap-1 rounded-xl bg-slate-100 p-1">{([['front', '앞면 HTML'], ['back', '뒷면 HTML'], ['css', '공통 CSS']] as const).map(([id, label]) => <button key={id} onClick={() => setMode(id)} className={`rounded-lg px-3 py-1.5 text-xs font-semibold ${mode === id ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-400'}`}>{label}</button>)}</div><div className="flex gap-2"><button onClick={async () => { await navigator.clipboard.writeText(draft); notify('코드를 복사했습니다.') }} className="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-600"><Copy size={14} />복사</button><button onClick={apply} disabled={!changed} className={`inline-flex items-center gap-2 rounded-xl px-4 py-2 text-xs font-semibold ${changed ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-400'}`}><Save size={14} />{changed ? '저장' : '저장됨'}</button></div></div>
-      <div className="relative min-h-0 flex-1 overflow-hidden bg-[#0d1425]"><pre ref={codeLayer} aria-hidden className="pointer-events-none absolute inset-0 overflow-hidden whitespace-pre-wrap break-words p-5 font-mono text-[13px] leading-6"><code>{highlightCode(draft, mode)}</code></pre><textarea aria-label="카드 템플릿 코드" spellCheck={false} value={draft} onScroll={(event) => { if (codeLayer.current) { codeLayer.current.scrollTop = event.currentTarget.scrollTop; codeLayer.current.scrollLeft = event.currentTarget.scrollLeft } }} onChange={(event) => { setDraft(event.target.value); setChanged(event.target.value !== value) }} className="absolute inset-0 h-full min-h-0 w-full resize-none overflow-auto bg-transparent p-5 font-mono text-[13px] leading-6 text-transparent caret-white outline-none selection:bg-indigo-400/30" /></div>
+      <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-slate-100 p-4"><div className="flex shrink-0 gap-1 rounded-xl bg-slate-100 p-1">{([['front', '앞면 HTML'], ['back', '뒷면 HTML'], ['css', '공통 CSS']] as const).map(([id, label]) => <button key={id} onClick={() => setMode(id)} className={`rounded-lg px-3 py-1.5 text-xs font-semibold ${mode === id ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-400'}`}>{label}</button>)}</div><div className="ml-auto flex items-center gap-2"><button onClick={async () => { await navigator.clipboard.writeText(draft); notify('코드를 복사했습니다.') }} className="inline-flex h-9 items-center gap-2 rounded-xl border border-slate-200 px-3 text-xs font-semibold text-slate-600 transition hover:bg-slate-50"><Copy size={14} />복사</button>{changed ? <><button onClick={discardDraft} className="inline-flex h-9 items-center gap-2 rounded-xl border border-slate-200 px-3 text-xs font-semibold text-slate-600 transition hover:bg-slate-50"><RotateCcw size={14} />되돌리기</button><button onClick={apply} className="inline-flex h-9 items-center gap-2 rounded-xl bg-indigo-600 px-4 text-xs font-semibold text-white shadow-lg shadow-indigo-500/20 transition hover:bg-indigo-700"><Save size={14} />작업본에 저장</button></> : <span role="status" className="inline-flex h-9 items-center gap-1.5 px-2 text-xs font-medium text-slate-400"><Check size={14} className="text-emerald-500" />작업본에 저장됨</span>}</div></div>
+      <div className="relative min-h-0 flex-1 overflow-hidden bg-[#0d1425]"><pre ref={codeLayer} aria-hidden className="pointer-events-none absolute inset-0 overflow-hidden whitespace-pre-wrap break-words p-5 font-mono text-[13px] leading-6"><code>{highlightCode(draft, mode)}</code></pre><textarea aria-label="카드 템플릿 코드" spellCheck={false} value={draft} onScroll={(event) => { if (codeLayer.current) { codeLayer.current.scrollTop = event.currentTarget.scrollTop; codeLayer.current.scrollLeft = event.currentTarget.scrollLeft } }} onChange={(event) => updateDraft(event.target.value)} className="absolute inset-0 h-full min-h-0 w-full resize-none overflow-auto bg-transparent p-5 font-mono text-[13px] leading-6 text-transparent caret-white outline-none selection:bg-indigo-400/30" /></div>
     </section>
   </div>
 }
