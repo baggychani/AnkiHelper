@@ -1111,6 +1111,7 @@ function FieldsPage({ noteType, onRename, onAdd, onDelete, onReorder, onMove, on
 function MediaPage({ onExport }: { onExport: () => void }) {
   const [items, setItems] = useState<MediaItem[]>([])
   const [query, setQuery] = useState('')
+  const [filter, setFilter] = useState<'all' | MediaItem['type']>('all')
   const [playing, setPlaying] = useState('')
   const [health, setHealth] = useState<MediaHealth | null>(null)
   const [video, setVideo] = useState<MediaItem | null>(null)
@@ -1178,8 +1179,9 @@ function MediaPage({ onExport }: { onExport: () => void }) {
     setError('')
     setPlaying(item.stored_name)
     try {
-      // Buffer the exact APKG payload before playback.  This avoids WebView
-      // range/cache races that can produce clicks or metallic edge artifacts.
+      // Some otherwise valid Anki MP3s used to gain metallic clicks at their
+      // edges when WebView decoded them while range/cache requests were racing.
+      // Buffering the exact APKG payload first makes each playback one resource.
       const response = await fetch(api.mediaUrl(item.stored_name), { cache: 'no-store' })
       if (!response.ok) throw new Error(`HTTP ${response.status}`)
       const bytes = await response.arrayBuffer()
@@ -1236,8 +1238,19 @@ function MediaPage({ onExport }: { onExport: () => void }) {
           : item.name
     await navigator.clipboard.writeText(reference)
   }
-  const visible = items.filter((item) => item.name.toLowerCase().includes(query.toLowerCase()))
+  const visible = items.filter((item) =>
+    (filter === 'all' || item.type === filter)
+    && item.name.toLowerCase().includes(query.toLowerCase()),
+  )
   const count = (type: MediaItem['type']) => items.filter((item) => item.type === type).length
+  const chooseFilter = (next: 'all' | MediaItem['type']) => {
+    if (next !== 'all' && items.find((item) => item.stored_name === playing)?.type !== next) {
+      playbackRequestRef.current += 1
+      disposeAudio()
+      setPlaying('')
+    }
+    setFilter(next)
+  }
   const icon = (item: MediaItem) => item.type === 'image'
     ? <img src={api.mediaUrl(item.stored_name)} alt="" className="h-10 w-10 rounded-lg bg-slate-100 object-cover" />
     : <span className="grid h-10 w-10 place-items-center rounded-lg bg-violet-100 text-violet-600">{item.type === 'font' ? <Type size={17} /> : item.type === 'video' ? <Play size={17} /> : <Music2 size={17} />}</span>
@@ -1245,11 +1258,11 @@ function MediaPage({ onExport }: { onExport: () => void }) {
 
   return <div className="mx-auto flex h-full min-h-0 max-w-[1420px] flex-col gap-4">
     <div className="flex shrink-0 flex-wrap items-center gap-x-5 gap-y-2 rounded-2xl border border-slate-200/70 bg-white px-5 py-3 text-xs shadow-card">
-      <b className="text-sm text-slate-700">미디어 {items.length.toLocaleString()}개</b>
-      <span className="inline-flex items-center gap-1.5 text-slate-500"><Music2 size={14} className="text-violet-500" />음성 {count('audio').toLocaleString()}</span>
-      <span className="inline-flex items-center gap-1.5 text-slate-500"><Image size={14} className="text-cyan-500" />이미지 {count('image').toLocaleString()}</span>
-      <span className="inline-flex items-center gap-1.5 text-slate-500"><Play size={14} className="text-rose-500" />영상 {count('video').toLocaleString()}</span>
-      <span className="inline-flex items-center gap-1.5 text-slate-500"><Type size={14} className="text-amber-600" />폰트 {count('font').toLocaleString()}</span>
+      <button type="button" aria-pressed={filter === 'all'} onClick={() => chooseFilter('all')} className={`text-sm font-bold transition hover:text-indigo-600 ${filter === 'all' ? 'text-slate-800' : 'text-slate-700'}`}>미디어 {items.length.toLocaleString()}개</button>
+      <button type="button" aria-pressed={filter === 'audio'} onClick={() => chooseFilter('audio')} className={`inline-flex items-center gap-1.5 transition hover:text-violet-700 ${filter === 'audio' ? 'font-semibold text-violet-700' : 'text-slate-500'}`}><Music2 size={14} className="text-violet-500" />음성 {count('audio').toLocaleString()}</button>
+      <button type="button" aria-pressed={filter === 'image'} onClick={() => chooseFilter('image')} className={`inline-flex items-center gap-1.5 transition hover:text-cyan-700 ${filter === 'image' ? 'font-semibold text-cyan-700' : 'text-slate-500'}`}><Image size={14} className="text-cyan-500" />이미지 {count('image').toLocaleString()}</button>
+      <button type="button" aria-pressed={filter === 'video'} onClick={() => chooseFilter('video')} className={`inline-flex items-center gap-1.5 transition hover:text-rose-700 ${filter === 'video' ? 'font-semibold text-rose-700' : 'text-slate-500'}`}><Play size={14} className="text-rose-500" />영상 {count('video').toLocaleString()}</button>
+      <button type="button" aria-pressed={filter === 'font'} onClick={() => chooseFilter('font')} className={`inline-flex items-center gap-1.5 transition hover:text-amber-700 ${filter === 'font' ? 'font-semibold text-amber-700' : 'text-slate-500'}`}><Type size={14} className="text-amber-600" />폰트 {count('font').toLocaleString()}</button>
     </div>
     <section className="flex min-h-0 flex-1 flex-col rounded-[18px] border border-slate-200/70 bg-white p-4 shadow-card lg:rounded-[22px] lg:p-5">
       <div className="mb-4 flex shrink-0 flex-wrap items-center justify-between gap-3">

@@ -120,10 +120,11 @@ def _temporary_file_response(path: Path, *, filename: str, media_type: str) -> F
 def _media_response(data: bytes, *, filename: str, range_header: str | None = None) -> Response:
     """Serve stable media bytes, including the single ranges used by players.
 
-    APKG entries may need decompression before they can be played.  Serving a
-    newly-created temporary file for every request changes its validators while
-    a browser is fetching byte ranges, and the shared /api/media/0 style URLs
-    can otherwise leak stale media between opened packages.
+    Previously, every audio range request was served from a new temporary file.
+    Its changing ETag/mtime made one MP3 look like different resources to the
+    WebView decoder, causing metallic clicks at the start or end of some files.
+    Stable decoded bytes, validators, and explicit ranges fixed that issue; the
+    no-store policy also prevents /api/media/0 cache reuse across APKG files.
     """
     media_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
     size = len(data)
