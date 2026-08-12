@@ -44,6 +44,135 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   .welcome-rise {
     animation: none;
   }
+
+  .welcome-sparkle-shell,
+  .welcome-sparkle-shell::before,
+  .welcome-aurora-pointer,
+  .welcome-glow-orb,
+  .welcome-content {
+    animation: none !important;
+    transition: none !important;
+    transform: none !important;
+  }
+}
+
+.welcome-shell {
+  isolation: isolate;
+  background:
+    linear-gradient(145deg, rgba(22, 31, 56, .34), transparent 46%),
+    #0d1425;
+}
+
+.welcome-ambient {
+  background:
+    radial-gradient(ellipse 58% 50% at 12% 13%, rgba(99, 102, 241, .18), transparent 66%),
+    radial-gradient(ellipse 48% 44% at 88% 90%, rgba(13, 148, 136, .1), transparent 70%);
+}
+
+.welcome-aurora-pointer {
+  background:
+    radial-gradient(ellipse 34% 38% at var(--welcome-x, 50%) var(--welcome-y, 50%), rgba(129, 140, 248, .2), transparent 68%),
+    radial-gradient(ellipse 25% 29% at calc(var(--welcome-x, 50%) + 13%) calc(var(--welcome-y, 50%) + 10%), rgba(45, 212, 191, .09), transparent 72%);
+  mix-blend-mode: screen;
+  opacity: .82;
+}
+
+.welcome-glow-orb {
+  left: var(--welcome-x, 50%);
+  top: var(--welcome-y, 50%);
+  width: min(30vw, 250px);
+  height: min(30vw, 250px);
+  transform: translate(-50%, -50%);
+  border-radius: 999px;
+  background: radial-gradient(circle, rgba(196, 181, 253, .08), rgba(129, 140, 248, .025) 42%, transparent 72%);
+  filter: blur(24px);
+  opacity: .72;
+}
+
+.welcome-mesh {
+  background-image:
+    linear-gradient(rgba(148, 163, 184, .023) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(148, 163, 184, .023) 1px, transparent 1px);
+  background-size: 48px 48px;
+  mask-image: radial-gradient(ellipse 72% 65% at 50% 50%, #000 18%, transparent 84%);
+  -webkit-mask-image: radial-gradient(ellipse 72% 65% at 50% 50%, #000 18%, transparent 84%);
+  opacity: .7;
+}
+
+.welcome-content {
+  transform: translate3d(var(--welcome-drift-x, 0), var(--welcome-drift-y, 0), 0);
+  will-change: transform;
+}
+
+.welcome-sparkle-shell {
+  position: relative;
+  isolation: isolate;
+  animation: welcome-sparkle-float 4.8s cubic-bezier(.45, 0, .55, 1) infinite;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .08), 0 12px 30px rgba(2, 6, 23, .2);
+}
+
+.welcome-sparkle-shell::before {
+  position: absolute;
+  z-index: -1;
+  inset: -9px;
+  border: 1px solid rgba(196, 181, 253, .13);
+  border-radius: 28px;
+  content: '';
+  opacity: 0;
+  transform: scale(.88);
+  animation: welcome-sparkle-halo 4.8s cubic-bezier(.45, 0, .55, 1) infinite;
+}
+
+@keyframes welcome-sparkle-float {
+  0%, 100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-3px);
+  }
+}
+
+@keyframes welcome-sparkle-halo {
+  0%, 100% {
+    opacity: 0;
+    transform: scale(.88);
+  }
+  48% {
+    opacity: .7;
+    transform: scale(1);
+  }
+}
+
+.welcome-action-btn {
+  position: relative;
+  overflow: hidden;
+  transition:
+    transform .24s cubic-bezier(.22, 1, .36, 1),
+    box-shadow .28s ease,
+    background-color 0.2s ease,
+    border-color 0.2s ease;
+}
+
+.welcome-action-btn:hover:not(:disabled) {
+  transform: translateY(-2px);
+}
+
+.welcome-action-btn-primary:hover:not(:disabled) {
+  box-shadow:
+    0 14px 30px rgba(2, 6, 23, .28),
+    0 0 0 1px rgba(255, 255, 255, .12);
+}
+
+.welcome-action-btn-secondary:hover:not(:disabled) {
+  border-color: rgba(165, 243, 252, .32);
+  background: rgba(255, 255, 255, .075);
+  box-shadow:
+    0 12px 28px rgba(2, 6, 23, .24),
+    0 0 24px rgba(34, 211, 238, .075);
+}
+
+.welcome-action-btn:active:not(:disabled) {
+  transform: translateY(0);
 }
 
 /* Card-design tabs should hug their labels instead of stretching across the toolbar. */
