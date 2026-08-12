@@ -3,7 +3,7 @@ export type Template = { name: string; front: string; back: string }
 export type NoteType = { id: string; name: string; fields: Field[]; templates: Template[]; css: string; notes: string[][] }
 export type MediaKind = 'audio' | 'image' | 'video' | 'font' | 'other'
 export type MediaItem = { name: string; stored_name: string; size: number; type: MediaKind }
-export type MediaReference = { filename: string; location: string; source: 'field' | 'template' | 'css' }
+export type MediaReference = { filename: string; location: string; source: 'field' | 'template' | 'css' | 'script' }
 export type MediaHealth = {
   missing: MediaReference[]
   references: Record<string, MediaReference[]>

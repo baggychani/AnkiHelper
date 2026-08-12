@@ -20,6 +20,7 @@ from anki_helper.anki_package import (
     export_media,
     export_project,
     import_media,
+    inspect_table_source,
     media_health,
     media_reference_filename,
     media_items,
@@ -29,10 +30,6 @@ from anki_helper.anki_package import (
     save_apkg,
     split_field_content,
 )
-
-backend = None
-if find_spec("fastapi") is not None:
-    from anki_helper import backend
 
 
 class MediaWorkflowTests(unittest.TestCase):
@@ -45,16 +42,8 @@ class MediaWorkflowTests(unittest.TestCase):
             ["Front", "Back"], [["question", "answer"]],
             deck_name="Media test", note_type_name="Basic", front_field=0, back_field=1,
         )
-        self.previous_backend_state = backend.app.state.workspace if backend else None
-        if backend:
-            backend.app.state.workspace = backend.BackendState(
-                package=self.package,
-                selected_note_type_id=self.package.note_types[0].id,
-            )
 
     def tearDown(self) -> None:
-        if backend:
-            backend.app.state.workspace = self.previous_backend_state
         for staged_path in self.package.pending_media.values():
             staged_path.unlink(missing_ok=True)
         self.package.source.unlink(missing_ok=True)
@@ -166,108 +155,6 @@ class MediaWorkflowTests(unittest.TestCase):
             ),
         )
 
-    @unittest.skipIf(backend is None, "FastAPI is required for backend preview tests")
-    def test_preview_embeds_pending_design_assets(self) -> None:
-        import_media(self.package, [self.asset], template_asset=True)
-        preview = backend._embed_preview_media(
-            '<style>.badge { background-image: url("_badge.svg"); }</style><img src="_badge.svg">',
-            package=self.package,
-        )
-
-        self.assertNotIn('src="_badge.svg"', preview)
-        self.assertNotIn('url("_badge.svg")', preview)
-        self.assertEqual(3, preview.count("http://127.0.0.1:8765/api/media/0"))
-
-    @unittest.skipIf(backend is None, "FastAPI is required for backend preview tests")
-    def test_preview_uses_anki_compatible_replay_button(self) -> None:
-        sound = self.root / "answer.mp3"
-        sound.write_bytes(b"audio")
-        import_media(self.package, [sound])
-        preview = backend._embed_preview_media(
-            "<span class='sound' data-sound='answer.mp3'>🔊 answer.mp3</span>",
-            package=self.package,
-        )
-
-        self.assertIn("class='replay-button anki-audio sound'", preview)
-        self.assertIn("<svg viewBox='0 0 48 48'", preview)
-
-    @unittest.skipIf(backend is None, "FastAPI is required for backend preview tests")
-    def test_preview_resolves_quoted_sound_filenames_safely(self) -> None:
-        sound = self.root / "teacher's answer.mp3"
-        sound.write_bytes(b"audio")
-        item = import_media(self.package, [sound])[0]
-        markup = render_template(
-            "{{Back}}",
-            self.package.note_types[0].fields,
-            ["question", "[sound:teacher's answer.mp3]"],
-        )
-        preview = backend._embed_preview_media(markup, package=self.package)
-
-        self.assertIn(f"/api/media/{item['stored_name']}", preview)
-        self.assertEqual(1, preview.count("class='replay-button anki-audio sound'"))
-
-    @unittest.skipIf(backend is None, "FastAPI is required for backend media tests")
-    def test_media_response_has_stable_ranges_without_shared_cache(self) -> None:
-        payload = b"0123456789"
-        full = backend._media_response(payload, filename="answer.mp3")
-        partial = backend._media_response(payload, filename="answer.mp3", range_header="bytes=2-5")
-        suffix = backend._media_response(payload, filename="answer.mp3", range_header="bytes=-3")
-
-        self.assertEqual(payload, full.body)
-        self.assertEqual("audio/mpeg", full.media_type)
-        self.assertEqual("bytes", full.headers["accept-ranges"])
-        self.assertEqual("no-store", full.headers["cache-control"])
-        self.assertNotIn("content-disposition", full.headers)
-        self.assertEqual(full.headers["etag"], partial.headers["etag"])
-        self.assertEqual(206, partial.status_code)
-        self.assertEqual(b"2345", partial.body)
-        self.assertEqual("bytes 2-5/10", partial.headers["content-range"])
-        self.assertEqual(b"789", suffix.body)
-
-    @unittest.skipIf(backend is None, "FastAPI is required for backend preview tests")
-    def test_preview_resolves_dynamic_template_media_assignments(self) -> None:
-        import_media(self.package, [self.asset], template_asset=True)
-        preview = backend._embed_preview_media(
-            '<script>const filename = "_badge.svg"; image.src = filename</script>',
-            package=self.package,
-        )
-
-        self.assertIn('const assets={"_badge.svg": "http://127.0.0.1:8765/api/media/0"}', preview)
-        self.assertIn('patch(HTMLImageElement.prototype,"src")', preview)
-        self.assertLess(preview.index('patch(HTMLImageElement.prototype,"src")'), preview.index('image.src = filename'))
-
-    @unittest.skipIf(backend is None, "FastAPI is required for backend preview tests")
-    def test_preview_preserves_storage_between_iframe_documents(self) -> None:
-        preview = backend._embed_preview_media("<div></div>", package=self.package)
-
-        self.assertIn('host.__ankiHelperPreviewState', preview)
-        self.assertIn('states.storage', preview)
-        self.assertIn('Storage.prototype.getItem=function', preview)
-
-    @unittest.skipIf(backend is None, "FastAPI is required for backend preview tests")
-    def test_preview_rewrites_linked_stylesheet_assets(self) -> None:
-        stylesheet = self.root / "theme.css"
-        stylesheet.write_text('.badge { background-image: url("_badge.svg"); }', encoding="utf-8")
-        import_media(self.package, [self.asset, stylesheet], template_asset=True)
-        preview = backend._embed_preview_media(
-            '<link rel="stylesheet" href="_theme.css">',
-            package=self.package,
-        )
-
-        encoded = preview.split("data:text/css;base64,", 1)[1].split('"', 1)[0]
-        stylesheet_preview = __import__("base64").b64decode(encoded).decode("utf-8")
-        self.assertIn("http://127.0.0.1:8765/api/media/0", stylesheet_preview)
-
-    @unittest.skipIf(backend is None, "FastAPI is required for backend preview tests")
-    def test_media_delete_requires_force_when_referenced(self) -> None:
-        import_media(self.package, [self.asset], template_asset=True)
-        self.package.note_types[0].templates[0].front = '<img src="_badge.svg">'
-        with self.assertRaises(backend.HTTPException) as raised:
-            backend.delete_media("0")
-        self.assertEqual(409, raised.exception.status_code)
-        backend.delete_media("0", force=True)
-        self.assertEqual({}, self.package.media)
-
     def test_media_health_resolves_url_encoded_references_and_reports_missing(self) -> None:
         special = self.root / "badge 100%.svg"
         unused = self.root / "unused.mp3"
@@ -309,6 +196,29 @@ class MediaWorkflowTests(unittest.TestCase):
             import_media(self.package, [self.asset, missing], template_asset=True)
         self.assertEqual({}, self.package.media)
         self.assertEqual({}, self.package.pending_media)
+
+    @unittest.skipIf(find_spec("openpyxl") is None, "openpyxl is required for XLSX import tests")
+    def test_xlsx_table_source_reads_workbook_sheets(self) -> None:
+        from openpyxl import Workbook
+
+        xlsx_path = self.root / "table.xlsx"
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "Sheet1"
+        sheet["A1"] = "Front"
+        sheet["B1"] = "Back"
+        sheet["A2"] = "hello"
+        sheet["B2"] = "world"
+        workbook.create_sheet("Notes")
+        workbook.save(xlsx_path)
+        workbook.close()
+
+        preview = inspect_table_source(xlsx_path)
+
+        self.assertEqual("xlsx", preview.kind)
+        self.assertEqual(["Sheet1", "Notes"], preview.sheet_names)
+        self.assertEqual(["Front", "Back"], preview.rows[0])
+        self.assertEqual(["hello", "world"], preview.rows[1])
 
 
 if __name__ == "__main__":

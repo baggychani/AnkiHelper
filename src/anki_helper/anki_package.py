@@ -12,7 +12,6 @@ import tempfile
 import shutil
 import unicodedata
 import zlib
-import xml.etree.ElementTree as ET
 from copy import deepcopy
 from datetime import datetime
 import zipfile
@@ -1113,61 +1112,28 @@ def _drop_empty_columns(rows: list[list[str]]) -> tuple[list[list[str]], int]:
 
 
 def _read_xlsx(source: Path) -> dict[str, list[list[str]]]:
-    ns = {"main": "http://schemas.openxmlformats.org/spreadsheetml/2006/main", "rel": "http://schemas.openxmlformats.org/officeDocument/2006/relationships", "pkg": "http://schemas.openxmlformats.org/package/2006/relationships"}
     try:
-        with zipfile.ZipFile(source) as archive:
-            workbook = ET.fromstring(archive.read("xl/workbook.xml"))
-            relationships = ET.fromstring(archive.read("xl/_rels/workbook.xml.rels"))
-            targets = {item.attrib["Id"]: item.attrib["Target"] for item in relationships.findall("pkg:Relationship", ns)}
-            shared: list[str] = []
-            if "xl/sharedStrings.xml" in archive.namelist():
-                strings = ET.fromstring(archive.read("xl/sharedStrings.xml"))
-                shared = ["".join(item.itertext()) for item in strings.findall("main:si", ns)]
-            output: dict[str, list[list[str]]] = {}
-            for sheet in workbook.findall("main:sheets/main:sheet", ns):
-                target = targets.get(sheet.attrib.get("{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id", ""))
-                if not target:
-                    continue
-                sheet_path = "xl/" + target.lstrip("/") if not target.startswith("xl/") else target
-                output[sheet.attrib.get("name", "시트")] = _read_xlsx_sheet(archive.read(sheet_path), shared, ns)
-            return output
-    except (KeyError, OSError, ET.ParseError, zipfile.BadZipFile) as exc:
+        from openpyxl import load_workbook
+    except ImportError as exc:
+        raise ValueError("Excel(.xlsx) 파일을 읽으려면 openpyxl이 필요합니다.") from exc
+
+    try:
+        workbook = load_workbook(source, read_only=True, data_only=True)
+    except (OSError, ValueError, KeyError) as exc:
         raise ValueError("읽을 수 없는 Excel(.xlsx) 파일입니다.") from exc
 
-
-def _read_xlsx_sheet(payload: bytes, shared: list[str], ns: dict[str, str]) -> list[list[str]]:
-    root = ET.fromstring(payload)
-    rows: list[list[str]] = []
-    for row in root.findall("main:sheetData/main:row", ns):
-        values: list[str] = []
-        for cell in row.findall("main:c", ns):
-            reference = cell.attrib.get("r", "A1")
-            column = _xlsx_column_index(reference)
-            values.extend([""] * max(0, column - len(values)))
-            kind = cell.attrib.get("t")
-            value = cell.findtext("main:v", default="", namespaces=ns)
-            if kind == "s" and value.isdigit() and int(value) < len(shared):
-                values.append(shared[int(value)])
-            elif kind == "inlineStr":
-                inline = cell.find("main:is", ns)
-                values.append("".join(inline.itertext()) if inline is not None else "")
-            elif kind == "b":
-                values.append("TRUE" if value == "1" else "FALSE")
-            elif value:
-                values.append(value)
-            else:
-                formula = cell.findtext("main:f", default="", namespaces=ns)
-                values.append(f"={formula}" if formula else "")
-        rows.append(values)
-    return _trim_table(rows)
-
-
-def _xlsx_column_index(reference: str) -> int:
-    letters = "".join(char for char in reference if char.isalpha())
-    value = 0
-    for char in letters:
-        value = value * 26 + ord(char.upper()) - 64
-    return max(value - 1, 0)
+    output: dict[str, list[list[str]]] = {}
+    try:
+        for sheet_name in workbook.sheetnames:
+            sheet = workbook[sheet_name]
+            rows: list[list[str]] = []
+            for row in sheet.iter_rows(values_only=True):
+                values = ["" if cell is None else str(cell).strip() for cell in row]
+                rows.append(values)
+            output[sheet_name] = _trim_table(rows)
+    finally:
+        workbook.close()
+    return output
 
 
 _LEGACY_SCHEMA = """
