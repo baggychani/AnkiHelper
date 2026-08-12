@@ -2,7 +2,7 @@
 
 Anki Helper는 Anki의 `.apkg` 파일을 열어 카드 데이터, 필드, 미디어와 카드 디자인을 한곳에서 편집하는 Windows 데스크톱 앱입니다. 화면은 React와 Tailwind CSS, 데스크톱 실행 환경은 Tauri, APKG 처리는 Python FastAPI가 담당합니다.
 
-현재 버전: **1.4.2**
+현재 버전: **1.4.3**
 
 ## 지원 파일
 
@@ -37,7 +37,7 @@ Anki Helper는 Anki의 `.apkg` 파일을 열어 카드 데이터, 필드, 미디
 
 미디어 검사 버튼은 저장 전에 깨진 이미지·음성·폰트 참조와 플랫폼별 대소문자 충돌을 찾는 용도입니다. 파일명에 Windows에서 허용되지 않는 문자가 있으면 추가할 때 안전한 이름으로 정리하며, 같은 이름을 대소문자만 달리 추가하면 자동으로 고유 이름을 만듭니다. 폰트 파일은 **CSS 복사**, 이미지·음성·영상은 **태그 복사**로 올바른 참조를 만들 수 있습니다.
 
-최신 Anki가 내보낸 Zstandard 압축 미디어와 protobuf 미디어 인덱스도 원래 형식으로 보존합니다. 음성 듣기는 APKG의 원본 음원 바이트를 완전히 읽은 뒤 재생하며, 실시간 미리보기의 구간 재생 요청도 동일한 파일 검증값과 정확한 바이트 범위로 처리합니다.
+최신 Anki가 내보낸 Zstandard 압축 미디어와 protobuf 미디어 인덱스도 원래 형식으로 보존합니다. 음성 듣기는 APKG의 원본 음원 바이트를 완전히 읽은 뒤 재생하며, 실시간 미리보기에서는 Anki처럼 카드 면이 열릴 때 포함된 음성을 순서대로 자동 재생합니다. 재생 버튼으로 다시 듣거나 중지할 수 있고, 미리보기의 구간 재생 요청도 동일한 파일 검증값과 정확한 바이트 범위로 처리합니다.
 
 ## 저장과 백업
 
@@ -157,8 +157,8 @@ npm run tauri build
 정식 버전을 배포할 때는 Python·npm·Cargo·Tauri 버전을 동일하게 맞춘 뒤 버전 태그를 푸시합니다.
 
 ```powershell
-git tag v1.4.2
-git push origin v1.4.2
+git tag v1.4.3
+git push origin v1.4.3
 ```
 
 일반 `npm run tauri build`는 이 저장소에서 개발할 때 사용하는 로컬 빌드이며 `.venv`의 Python을 실행합니다. GitHub Release 빌드는 Python 설치가 없는 PC에서도 실행되도록 별도의 `tauri.release.conf.json`과 번들된 Python sidecar를 사용합니다.
