@@ -5,7 +5,7 @@ import { openUrl } from '@tauri-apps/plugin-opener'
 import { invoke } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import {
-  ArrowLeft, ArrowRight, ArrowRightLeft, BookOpen, Braces, Check, ChevronDown, ChevronRight, ChevronUp, Code2, Copy,
+  AlertTriangle, ArrowLeft, ArrowRight, ArrowRightLeft, BookOpen, Braces, Check, ChevronDown, ChevronRight, ChevronUp, Code2, Copy,
   ArrowUpRight, Download, FileArchive, FolderOpen, Grid2X2, HardDrive,
   FileSpreadsheet, Image, Layers3, ListChecks, LoaderCircle, LogOut, Music2, Palette, PanelLeft,
   Play, Plus, RotateCcw, Save, ScanSearch, Sparkles, Table2, Trash2, Type, X,
@@ -423,24 +423,31 @@ function App() {
     {pendingWork && <UnsavedWorkModal onCancel={() => setPendingWork(null)} onSave={() => void continuePendingWork(true)} onDiscard={() => void continuePendingWork(false)} />}
     {tableImport && <SpreadsheetImportWizard initial={tableImport.preview} onCancel={() => setTableImport(null)} onSheetChange={(sheet) => api.inspectTable(tableImport.path, sheet)} onCreate={async (payload) => { setBusy(true); setError(''); try { hydrate(await api.createFromTable({ path: tableImport.path, ...payload })); setDirty(true); setPage('overview'); setTableImport(null); notify('새 덱 초안을 만들었습니다. 저장 위치를 선택해 주세요.'); } catch (caught) { setError(caught instanceof Error ? caught.message : '새 덱을 만들지 못했습니다.'); } finally { setBusy(false); } }} />}
     {availableUpdate && !error && !pendingWork && !tableImport && !exitPrompt && <UpdateAvailableModal update={availableUpdate} onDismiss={() => setAvailableUpdate(null)} onOpen={async () => { setAvailableUpdate(null); try { await openUrl(availableUpdate.url) } catch { setError('업데이트 페이지를 열지 못했습니다. 인터넷 연결을 확인한 뒤 다시 시도해 주세요.') } }} />}
-    {exitPrompt && (
-      <div className="fixed inset-0 z-[200] grid place-items-center bg-slate-950/45 p-4 backdrop-blur-sm" onClick={() => setExitPrompt(false)}>
-        <div role="dialog" aria-modal="true" aria-labelledby="exit-title" className="w-full max-w-md rounded-[22px] border border-white/70 bg-white p-6 shadow-2xl" onClick={(event) => event.stopPropagation()}>
-          <div className="mb-4 grid h-11 w-11 place-items-center rounded-xl bg-[#151d31] text-white"><LogOut size={20} /></div>
-          <h3 id="exit-title" className="text-lg font-semibold">Anki Helper를 종료할까요?</h3>
-          <p className="mt-2 text-sm leading-6 text-slate-500">
-            {dirty
-              ? '저장하지 않은 변경이 있습니다. 종료하면 이 작업 내용은 사라집니다.'
-              : '창을 닫으면 프로그램이 종료됩니다.'}
-          </p>
-          <div className="mt-6 flex justify-end gap-2">
-            <button onClick={() => setExitPrompt(false)} className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-semibold text-slate-600">취소</button>
-            <button onClick={() => void confirmExit()} className="rounded-xl bg-[#151d31] px-4 py-2.5 text-sm font-semibold text-white">종료</button>
-          </div>
-        </div>
-      </div>
-    )}
+    {exitPrompt && <ExitConfirmModal dirty={dirty} onCancel={() => setExitPrompt(false)} onConfirm={() => void confirmExit()} />}
   </main>
+}
+
+export function ExitConfirmModal({ dirty, onCancel, onConfirm }: { dirty: boolean; onCancel: () => void; onConfirm: () => void }) {
+  return <div className="fixed inset-0 z-[200] grid place-items-center bg-slate-950/45 p-4 backdrop-blur-sm" onClick={onCancel}>
+    <div role="dialog" aria-modal="true" aria-labelledby="exit-title" aria-describedby="exit-description" className="w-full max-w-md rounded-[24px] border border-white/75 bg-white p-6 shadow-[0_28px_80px_rgba(15,23,42,.32)]" onClick={(event) => event.stopPropagation()}>
+      <div className="mb-4 grid h-11 w-11 place-items-center rounded-xl bg-[#151d31] text-white shadow-[0_10px_24px_rgba(15,23,42,.16)]"><LogOut size={20} /></div>
+      <h3 id="exit-title" className="text-lg font-semibold tracking-[-.015em] text-slate-900">Anki Helper를 종료할까요?</h3>
+      <p id="exit-description" className="mt-2 text-sm leading-6 text-slate-500">
+        {dirty ? '저장되지 않은 변경 사항을 확인해 주세요.' : '창을 닫으면 프로그램이 종료됩니다.'}
+      </p>
+      {dirty && <div role="alert" className="mt-4 flex gap-3 rounded-2xl border border-amber-200/80 bg-amber-50/75 px-4 py-3.5">
+        <span className="mt-0.5 grid h-7 w-7 shrink-0 place-items-center rounded-lg bg-white/80 text-amber-700 shadow-sm ring-1 ring-amber-200/70"><AlertTriangle size={15} strokeWidth={2.2} /></span>
+        <div>
+          <p className="text-[13px] font-semibold text-amber-950">변경 내용이 저장되지 않았습니다</p>
+          <p className="mt-1 text-xs leading-5 text-amber-900/70">지금 종료하면 마지막 저장 이후의 변경 내용은 복구할 수 없습니다.</p>
+        </div>
+      </div>}
+      <div className="mt-6 flex justify-end gap-2">
+        <button onClick={onCancel} className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-semibold text-slate-600 transition hover:border-slate-300 hover:bg-slate-50">취소</button>
+        <button onClick={onConfirm} className={`rounded-xl px-4 py-2.5 text-sm font-semibold text-white transition ${dirty ? 'bg-slate-800 hover:bg-slate-900' : 'bg-[#151d31] hover:bg-[#202b45]'}`}>{dirty ? '저장하지 않고 종료' : '종료'}</button>
+      </div>
+    </div>
+  </div>
 }
 
 function UpdateAvailableModal({ update, onDismiss, onOpen }: { update: AvailableUpdate; onDismiss: () => void; onOpen: () => void | Promise<void> }) {
@@ -631,8 +638,8 @@ function Welcome({ onOpen, busy, dragActive }: { onOpen: () => void; busy: boole
     if (!root || !motionEnabledRef.current) return
     const target = targetRef.current
     const current = currentRef.current
-    current.x += (target.x - current.x) * 0.085
-    current.y += (target.y - current.y) * 0.085
+    current.x += (target.x - current.x) * 0.16
+    current.y += (target.y - current.y) * 0.16
     root.style.setProperty('--welcome-x', `${current.x}%`)
     root.style.setProperty('--welcome-y', `${current.y}%`)
     root.style.setProperty('--welcome-drift-x', `${(current.x - 50) * 0.035}px`)
