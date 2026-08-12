@@ -6,7 +6,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import {
   ArrowLeft, ArrowRight, ArrowRightLeft, BookOpen, Braces, Check, ChevronDown, ChevronRight, ChevronUp, Code2, Copy,
-  ArrowUpRight, Database, Download, FileArchive, FolderOpen, Grid2X2, HardDrive,
+  ArrowUpRight, Download, FileArchive, FolderOpen, Grid2X2, HardDrive,
   FileSpreadsheet, Image, Layers3, ListChecks, LoaderCircle, LogOut, Music2, Palette, PanelLeft,
   Play, Plus, RotateCcw, Save, ScanSearch, Sparkles, Table2, Trash2, Type, X,
 } from 'lucide-react'
@@ -210,7 +210,7 @@ function App() {
     return () => { window.clearTimeout(timer); controller.abort() }
   }, [selected, templateIndex, side, noteIndex, workspace])
 
-  const persist = async (): Promise<boolean> => {
+  const persist = useCallback(async (): Promise<boolean> => {
     if (!workspace) return false
     setBusy(true); setError('')
     try {
@@ -226,9 +226,9 @@ function App() {
       return true
     } catch (caught) { setError(caught instanceof Error ? caught.message : '저장하지 못했습니다.'); return false }
     finally { setBusy(false) }
-  }
+  }, [hydrate, notify, selected, workspace])
 
-  useEffect(() => { const requestSave = () => { void persist() }; window.addEventListener('ankihelper:request-save', requestSave); return () => window.removeEventListener('ankihelper:request-save', requestSave) }, [workspace, selected])
+  useEffect(() => { const requestSave = () => { void persist() }; window.addEventListener('ankihelper:request-save', requestSave); return () => window.removeEventListener('ankihelper:request-save', requestSave) }, [persist])
 
   useEffect(() => {
     const shortcut = (event: KeyboardEvent) => {
@@ -236,7 +236,7 @@ function App() {
     }
     window.addEventListener('keydown', shortcut)
     return () => window.removeEventListener('keydown', shortcut)
-  }, [workspace, page])
+  }, [page, persist, workspace])
 
   const exportFile = async (kind: ExportKind) => {
     if (!selected) return
@@ -286,11 +286,11 @@ function App() {
     finally { setBusy(false) }
   }, [hydrate])
 
-  const choosePackageNow = async () => {
+  const choosePackageNow = useCallback(async () => {
     const path = await open({ multiple: false, filters: [{ name: 'APKG 또는 편집 프로젝트', extensions: ['apkg', 'zip'] }] })
     if (typeof path !== 'string') return
     await openPackagePath(path)
-  }
+  }, [openPackagePath])
 
   const beginTableImport = useCallback(async (sourcePath?: string) => {
     const path = sourcePath ?? await open({ multiple: false, filters: [{ name: '엑셀 및 표 데이터', extensions: ['xlsx', 'csv', 'tsv', 'txt'] }] })
@@ -307,7 +307,7 @@ function App() {
     if (work.kind === 'open-path' && work.path) void openPackagePath(work.path)
     else if (work.kind === 'open-picker') void choosePackageNow()
     else void beginTableImport(work.path)
-  }, [beginTableImport, dirty, openPackagePath])
+  }, [beginTableImport, choosePackageNow, dirty, openPackagePath])
 
   const choosePackage = useCallback(() => requestWork({ kind: 'open-picker' }), [requestWork])
   const requestTableImport = useCallback(() => requestWork({ kind: 'table-picker' }), [requestWork])
@@ -411,7 +411,7 @@ function App() {
     {toast && <div className={`fixed bottom-7 left-1/2 z-[70] -translate-x-1/2 rounded-xl bg-[#0b1426] px-5 py-3 text-sm font-semibold text-white shadow-2xl ring-1 ring-white/10 transition-opacity duration-300 ${toastVisible ? 'opacity-100' : 'opacity-0'}`}><span className="mr-2 text-emerald-400">✓</span>{toast}</div>}
     {error && <Modal title="작업을 완료하지 못했습니다" description={error} tone="danger" confirmLabel="확인" onConfirm={() => setError('')} />}
     {pendingWork && <UnsavedWorkModal onCancel={() => setPendingWork(null)} onSave={() => void continuePendingWork(true)} onDiscard={() => void continuePendingWork(false)} />}
-    {tableImport && <SpreadsheetImportWizard path={tableImport.path} initial={tableImport.preview} onCancel={() => setTableImport(null)} onSheetChange={(sheet) => api.inspectTable(tableImport.path, sheet)} onCreate={async (payload) => { setBusy(true); setError(''); try { hydrate(await api.createFromTable({ path: tableImport.path, ...payload })); setDirty(true); setPage('overview'); setTableImport(null); notify('새 덱 초안을 만들었습니다. 저장 위치를 선택해 주세요.'); } catch (caught) { setError(caught instanceof Error ? caught.message : '새 덱을 만들지 못했습니다.'); } finally { setBusy(false); } }} />}
+    {tableImport && <SpreadsheetImportWizard initial={tableImport.preview} onCancel={() => setTableImport(null)} onSheetChange={(sheet) => api.inspectTable(tableImport.path, sheet)} onCreate={async (payload) => { setBusy(true); setError(''); try { hydrate(await api.createFromTable({ path: tableImport.path, ...payload })); setDirty(true); setPage('overview'); setTableImport(null); notify('새 덱 초안을 만들었습니다. 저장 위치를 선택해 주세요.'); } catch (caught) { setError(caught instanceof Error ? caught.message : '새 덱을 만들지 못했습니다.'); } finally { setBusy(false); } }} />}
     {availableUpdate && !error && !pendingWork && !tableImport && !exitPrompt && <UpdateAvailableModal update={availableUpdate} onDismiss={() => setAvailableUpdate(null)} onOpen={async () => { setAvailableUpdate(null); try { await openUrl(availableUpdate.url) } catch { setError('업데이트 페이지를 열지 못했습니다. 인터넷 연결을 확인한 뒤 다시 시도해 주세요.') } }} />}
     {exitPrompt && (
       <div className="fixed inset-0 z-[200] grid place-items-center bg-slate-950/45 p-4 backdrop-blur-sm" onClick={() => setExitPrompt(false)}>
@@ -469,8 +469,7 @@ function UpdateAvailableModal({ update, onDismiss, onOpen }: { update: Available
   </div>
 }
 
-function SpreadsheetImportWizard({ path, initial, onCancel, onSheetChange, onCreate }: {
-  path: string
+function SpreadsheetImportWizard({ initial, onCancel, onSheetChange, onCreate }: {
   initial: TablePreview
   onCancel: () => void
   onSheetChange: (sheet: string) => Promise<TablePreview>
@@ -1310,7 +1309,7 @@ function DesignPage({ noteType, index, setIndex, onSave, notify }: { noteType?: 
   const draft = drafts[draftKey] ?? value
   const changed = draft !== value
   const updateDraft = (nextValue: string) => setDrafts((current) => ({ ...current, [draftKey]: nextValue }))
-  const discardDraft = () => setDrafts(({ [draftKey]: _discarded, ...remaining }) => remaining)
+  const discardDraft = useCallback(() => setDrafts(({ [draftKey]: _discarded, ...remaining }) => remaining), [draftKey])
   const loadMediaNames = useCallback(async () => {
     setMediaNames((await api.media()).map((item) => item.name))
   }, [])
@@ -1318,7 +1317,7 @@ function DesignPage({ noteType, index, setIndex, onSave, notify }: { noteType?: 
     if (!changed) return
     await onSave(mode, draft)
     discardDraft()
-  }, [changed, draft, draftKey, mode, onSave])
+  }, [changed, discardDraft, draft, mode, onSave])
   useEffect(() => {
     const handler = (event: KeyboardEvent) => { if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') { event.preventDefault(); void apply() } }
     window.addEventListener('keydown', handler)

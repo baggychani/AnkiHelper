@@ -45,8 +45,16 @@ class MediaWorkflowTests(unittest.TestCase):
             ["Front", "Back"], [["question", "answer"]],
             deck_name="Media test", note_type_name="Basic", front_field=0, back_field=1,
         )
+        self.previous_backend_state = backend.app.state.workspace if backend else None
+        if backend:
+            backend.app.state.workspace = backend.BackendState(
+                package=self.package,
+                selected_note_type_id=self.package.note_types[0].id,
+            )
 
     def tearDown(self) -> None:
+        if backend:
+            backend.app.state.workspace = self.previous_backend_state
         for staged_path in self.package.pending_media.values():
             staged_path.unlink(missing_ok=True)
         self.package.source.unlink(missing_ok=True)
@@ -161,14 +169,10 @@ class MediaWorkflowTests(unittest.TestCase):
     @unittest.skipIf(backend is None, "FastAPI is required for backend preview tests")
     def test_preview_embeds_pending_design_assets(self) -> None:
         import_media(self.package, [self.asset], template_asset=True)
-        previous_package = backend._package
-        backend._package = self.package
-        try:
-            preview = backend._embed_preview_media(
-                '<style>.badge { background-image: url("_badge.svg"); }</style><img src="_badge.svg">'
-            )
-        finally:
-            backend._package = previous_package
+        preview = backend._embed_preview_media(
+            '<style>.badge { background-image: url("_badge.svg"); }</style><img src="_badge.svg">',
+            package=self.package,
+        )
 
         self.assertNotIn('src="_badge.svg"', preview)
         self.assertNotIn('url("_badge.svg")', preview)
@@ -179,14 +183,10 @@ class MediaWorkflowTests(unittest.TestCase):
         sound = self.root / "answer.mp3"
         sound.write_bytes(b"audio")
         import_media(self.package, [sound])
-        previous_package = backend._package
-        backend._package = self.package
-        try:
-            preview = backend._embed_preview_media(
-                "<span class='sound' data-sound='answer.mp3'>🔊 answer.mp3</span>"
-            )
-        finally:
-            backend._package = previous_package
+        preview = backend._embed_preview_media(
+            "<span class='sound' data-sound='answer.mp3'>🔊 answer.mp3</span>",
+            package=self.package,
+        )
 
         self.assertIn("class='replay-button anki-audio sound'", preview)
         self.assertIn("<svg viewBox='0 0 48 48'", preview)
@@ -201,12 +201,7 @@ class MediaWorkflowTests(unittest.TestCase):
             self.package.note_types[0].fields,
             ["question", "[sound:teacher's answer.mp3]"],
         )
-        previous_package = backend._package
-        backend._package = self.package
-        try:
-            preview = backend._embed_preview_media(markup)
-        finally:
-            backend._package = previous_package
+        preview = backend._embed_preview_media(markup, package=self.package)
 
         self.assertIn(f"/api/media/{item['stored_name']}", preview)
         self.assertEqual(1, preview.count("class='replay-button anki-audio sound'"))
@@ -232,12 +227,10 @@ class MediaWorkflowTests(unittest.TestCase):
     @unittest.skipIf(backend is None, "FastAPI is required for backend preview tests")
     def test_preview_resolves_dynamic_template_media_assignments(self) -> None:
         import_media(self.package, [self.asset], template_asset=True)
-        previous_package = backend._package
-        backend._package = self.package
-        try:
-            preview = backend._embed_preview_media('<script>const filename = "_badge.svg"; image.src = filename</script>')
-        finally:
-            backend._package = previous_package
+        preview = backend._embed_preview_media(
+            '<script>const filename = "_badge.svg"; image.src = filename</script>',
+            package=self.package,
+        )
 
         self.assertIn('const assets={"_badge.svg": "http://127.0.0.1:8765/api/media/0"}', preview)
         self.assertIn('patch(HTMLImageElement.prototype,"src")', preview)
@@ -245,12 +238,7 @@ class MediaWorkflowTests(unittest.TestCase):
 
     @unittest.skipIf(backend is None, "FastAPI is required for backend preview tests")
     def test_preview_preserves_storage_between_iframe_documents(self) -> None:
-        previous_package = backend._package
-        backend._package = self.package
-        try:
-            preview = backend._embed_preview_media("<div></div>")
-        finally:
-            backend._package = previous_package
+        preview = backend._embed_preview_media("<div></div>", package=self.package)
 
         self.assertIn('host.__ankiHelperPreviewState', preview)
         self.assertIn('states.storage', preview)
@@ -261,12 +249,10 @@ class MediaWorkflowTests(unittest.TestCase):
         stylesheet = self.root / "theme.css"
         stylesheet.write_text('.badge { background-image: url("_badge.svg"); }', encoding="utf-8")
         import_media(self.package, [self.asset, stylesheet], template_asset=True)
-        previous_package = backend._package
-        backend._package = self.package
-        try:
-            preview = backend._embed_preview_media('<link rel="stylesheet" href="_theme.css">')
-        finally:
-            backend._package = previous_package
+        preview = backend._embed_preview_media(
+            '<link rel="stylesheet" href="_theme.css">',
+            package=self.package,
+        )
 
         encoded = preview.split("data:text/css;base64,", 1)[1].split('"', 1)[0]
         stylesheet_preview = __import__("base64").b64decode(encoded).decode("utf-8")
@@ -276,15 +262,10 @@ class MediaWorkflowTests(unittest.TestCase):
     def test_media_delete_requires_force_when_referenced(self) -> None:
         import_media(self.package, [self.asset], template_asset=True)
         self.package.note_types[0].templates[0].front = '<img src="_badge.svg">'
-        previous_package = backend._package
-        backend._package = self.package
-        try:
-            with self.assertRaises(backend.HTTPException) as raised:
-                backend.delete_media("0")
-            self.assertEqual(409, raised.exception.status_code)
-            backend.delete_media("0", force=True)
-        finally:
-            backend._package = previous_package
+        with self.assertRaises(backend.HTTPException) as raised:
+            backend.delete_media("0")
+        self.assertEqual(409, raised.exception.status_code)
+        backend.delete_media("0", force=True)
         self.assertEqual({}, self.package.media)
 
     def test_media_health_resolves_url_encoded_references_and_reports_missing(self) -> None:

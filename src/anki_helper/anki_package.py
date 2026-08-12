@@ -16,7 +16,7 @@ import xml.etree.ElementTree as ET
 from copy import deepcopy
 from datetime import datetime
 import zipfile
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field as dataclass_field
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 from urllib.parse import unquote
@@ -85,10 +85,10 @@ class DeckPackage:
     archive_entries: set[str]
     database_name: str
     note_ids: dict[str, list[int]]
-    removed_note_type_ids: list[str] = field(default_factory=list)
+    removed_note_type_ids: list[str] = dataclass_field(default_factory=list)
     display_name: str | None = None
-    pending_media: dict[str, Path] = field(default_factory=dict)
-    removed_media: set[str] = field(default_factory=set)
+    pending_media: dict[str, Path] = dataclass_field(default_factory=dict)
+    removed_media: set[str] = dataclass_field(default_factory=set)
 
 
 class ApkgReadError(RuntimeError):
@@ -1194,7 +1194,6 @@ def render_template(template: str, fields: list[Field], values: list[str], front
     }
 
     def replace(match: re.Match[str]) -> str:
-        token = match.group(0)
         name = match.group(1).strip()
         if name == "FrontSide":
             return front_html

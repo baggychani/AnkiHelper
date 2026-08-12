@@ -109,8 +109,10 @@ Python 의존성:
 
 ```powershell
 python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
 ```
+
+실행 파일만 만드는 환경에서는 `requirements.txt`만 설치해도 됩니다. `requirements-dev.txt`에는 API 통합 테스트와 Ruff 정적 검사에 필요한 개발 의존성이 추가됩니다.
 
 프런트엔드 의존성:
 
@@ -126,15 +128,21 @@ cd frontend
 npm run tauri dev
 ```
 
-타입 검사와 로컬 빌드:
+정적 검사, 테스트와 로컬 빌드:
 
 ```powershell
+.\.venv\Scripts\python.exe -m ruff check app.py scripts src tests
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
 cd frontend
+npm run lint
 npm run check
+npm test
 npm run tauri build
 ```
 
 빌드된 실행 파일은 `frontend/src-tauri/target/release/anki-helper.exe`에 생성됩니다.
+
+`.github/workflows/ci.yml`도 `main` 푸시와 Pull Request마다 같은 Python 테스트·Ruff 검사 및 프런트엔드 ESLint·타입 검사·Vitest를 실행합니다. 배포 빌드는 별도의 Release 워크플로에 유지되어 일반 변경 검증과 릴리스 생성을 분리합니다.
 
 ## GitHub Release
 
