@@ -9,6 +9,8 @@ describe('preview audio script', () => {
     expect(script).toContain('fetch(url,{cache:"no-store"})')
     expect(script).toContain('URL.createObjectURL')
     expect(script).toContain('void startAutoplay()')
+    expect(script).toContain('finishCurrent')
+    expect(script).toContain('window.addEventListener("pagehide"')
     expect(script).not.toContain('new Audio(button.dataset.audio)')
   })
 
