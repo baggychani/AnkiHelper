@@ -12,6 +12,7 @@ import {
 } from 'lucide-react'
 import { api, type Field, type MediaHealth, type MediaItem, type NoteType, type SourceNoteType, type TablePreview, type Workspace } from './api'
 import { initialPreviewState, previewReducer, previewRequestKey, type PreviewSide } from './previewLifecycle'
+import { buildPreviewDocument } from './previewAudio'
 
 type Page = 'overview' | 'data' | 'fields' | 'media' | 'design' | 'preview'
 type EditorMode = 'front' | 'back' | 'css'
@@ -1452,8 +1453,7 @@ function PreviewPage({ noteType, previewState, previewKey, previewHtml, onSide, 
   if (!noteType) return null
   const total = Math.max(noteType.notes.length, 1)
   const { noteIndex, side } = previewState
-  const audioScript = `<script>(()=>{let currentAudio=null,currentButton=null;const mark=(button,active)=>{button.classList.toggle('playing',active);button.setAttribute('aria-pressed',String(active))};document.querySelectorAll('.anki-audio').forEach(button=>{let audio;const finish=()=>{mark(button,false);if(currentAudio===audio){currentAudio=null;currentButton=null}};button.addEventListener('click',()=>{if(!audio){audio=new Audio(button.dataset.audio);audio.preload='auto';audio.onended=finish;audio.onerror=finish}if(currentAudio&&currentAudio!==audio){currentAudio.pause();currentAudio.currentTime=0;if(currentButton)mark(currentButton,false)}if(audio.paused){if(audio.ended)audio.currentTime=0;currentAudio=audio;currentButton=button;audio.play().then(()=>mark(button,true)).catch(finish)}else{audio.pause();finish()}})})})()</script>`
-  const doc = previewHtml === null ? null : `<!doctype html><html><head><style>html,body{height:100%;margin:0}body{background:#fff}#anki-card{min-height:100%;box-sizing:border-box}</style></head><body class="card"><div id="anki-card" class="card">${previewHtml}</div>${audioScript}</body></html>`
+  const doc = previewHtml === null ? null : buildPreviewDocument(previewHtml)
   return <div className="mx-auto grid h-full min-h-[480px] max-w-[1420px] gap-3 lg:min-h-[620px] lg:grid-cols-[minmax(0,1fr)_230px] lg:gap-5 xl:grid-cols-[minmax(0,1fr)_250px]">
     <section className="grid min-h-0 place-items-center rounded-[20px] bg-[#172033] p-3 lg:rounded-[26px] lg:p-5">
       <div className="flex h-[min(72vh,710px)] max-h-full w-full max-w-[580px] flex-col overflow-hidden rounded-[24px] border-[6px] border-[#0a0f1d] bg-white shadow-2xl lg:rounded-[32px] lg:border-[7px]">
