@@ -1,6 +1,6 @@
 [project]
 name = "anki-helper"
-version = "2.0.0"
+version = "2.0.1"
 description = "Desktop editor for Anki APKG packages"
 requires-python = ">=3.10"
 dependencies = ["fastapi>=0.115", "openpyxl>=3.1", "uvicorn[standard]>=0.32", "zstandard>=0.23"]
