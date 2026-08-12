@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import { open, save } from '@tauri-apps/plugin-dialog'
 import { writeFile } from '@tauri-apps/plugin-fs'
 import { openUrl } from '@tauri-apps/plugin-opener'
@@ -11,6 +11,7 @@ import {
   Play, Plus, RotateCcw, Save, ScanSearch, Sparkles, Table2, Trash2, Type, X,
 } from 'lucide-react'
 import { api, type Field, type MediaHealth, type MediaItem, type NoteType, type SourceNoteType, type TablePreview, type Workspace } from './api'
+import { initialPreviewState, previewReducer, previewRequestKey, type PreviewSide } from './previewLifecycle'
 
 type Page = 'overview' | 'data' | 'fields' | 'media' | 'design' | 'preview'
 type EditorMode = 'front' | 'back' | 'css'
@@ -45,9 +46,8 @@ function App() {
   const [page, setPage] = useState<Page>('overview')
   const [selectedId, setSelectedId] = useState('')
   const [templateIndex, setTemplateIndex] = useState(0)
-  const [side, setSide] = useState<'front' | 'back'>('front')
-  const [noteIndex, setNoteIndex] = useState(0)
-  const [previewHtml, setPreviewHtml] = useState('')
+  const [previewState, dispatchPreview] = useReducer(previewReducer, initialPreviewState)
+  const [previewDocument, setPreviewDocument] = useState<{ key: string; html: string } | null>(null)
   const previewRevision = useRef(0)
   const [sidebarOpen, setSidebarOpen] = useState(() => window.innerWidth >= 1080)
   const [busy, setBusy] = useState(false)
@@ -123,8 +123,12 @@ function App() {
 
   useEffect(() => {
     setTemplateIndex(0)
-    setNoteIndex(0)
+    dispatchPreview({ type: 'reset' })
   }, [selectedId])
+
+  useEffect(() => {
+    dispatchPreview({ type: 'reset' })
+  }, [templateIndex])
 
   useEffect(() => { api.status().then((saved) => saved && hydrate(saved)).catch(() => undefined) }, [hydrate])
 
@@ -203,12 +207,18 @@ function App() {
   }, [hydrate])
   useEffect(() => {
     if (!selected?.templates.length) return
+    const requestKey = previewRequestKey(selected.id, templateIndex, previewState)
     const controller = new AbortController()
-    const timer = window.setTimeout(() => api.preview(selected.id, templateIndex, side, noteIndex, controller.signal)
-      .then(({ html }) => { if (!controller.signal.aborted) setPreviewHtml(`${html}<!-- anki-helper-preview:${++previewRevision.current} -->`) })
-      .catch(() => undefined), 100)
+    const timer = window.setTimeout(() => api.preview(selected.id, templateIndex, previewState.side, previewState.noteIndex, controller.signal)
+      .then(({ html }) => { if (!controller.signal.aborted) setPreviewDocument({ key: requestKey, html: `${html}<!-- anki-helper-preview:${++previewRevision.current} -->` }) })
+      .catch((caught) => {
+        if (!controller.signal.aborted) setError(caught instanceof Error ? caught.message : '카드 미리보기를 불러오지 못했습니다.')
+      }), 100)
     return () => { window.clearTimeout(timer); controller.abort() }
-  }, [selected, templateIndex, side, noteIndex, workspace])
+  }, [previewState, selected, templateIndex, workspace])
+
+  const activePreviewKey = selected ? previewRequestKey(selected.id, templateIndex, previewState) : ''
+  const activePreviewHtml = previewDocument?.key === activePreviewKey ? previewDocument.html : null
 
   const persist = useCallback(async (): Promise<boolean> => {
     if (!workspace) return false
@@ -281,7 +291,7 @@ function App() {
 
   const openPackagePath = useCallback(async (path: string) => {
     setBusy(true); setError('')
-    try { hydrate(await api.open(path)); setDirty(false); setPage('overview') }
+    try { hydrate(await api.open(path)); dispatchPreview({ type: 'reset' }); setDirty(false); setPage('overview') }
     catch (caught) { setError(caught instanceof Error ? caught.message : 'APKG를 열지 못했습니다.') }
     finally { setBusy(false) }
   }, [hydrate])
@@ -405,7 +415,7 @@ function App() {
           </div>
           <div className="flex shrink-0 items-center gap-2">{workspace && <><button onClick={persist} disabled={busy || !dirty} className={`inline-flex h-9 items-center gap-2 rounded-xl px-3 text-xs font-semibold transition lg:h-10 lg:px-4 ${dirty ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-500/20' : 'border border-slate-200 bg-white text-slate-400'}`}>{busy ? <LoaderCircle className="animate-spin" size={16} /> : <Save size={16} />}{dirty ? '저장' : '저장됨'}<span className="hidden text-[10px] opacity-65 lg:inline">Ctrl+S</span></button><div ref={newWorkMenuRef} className="relative"><button onClick={() => setNewWorkMenuOpen((open) => !open)} disabled={busy} className="inline-flex h-9 items-center gap-2 rounded-xl bg-[#11182a] px-3 text-xs font-semibold text-white transition hover:bg-[#202b45] lg:h-10 lg:px-4"><Plus size={16} /><span>새 작업</span><ChevronDown size={14} className={`transition ${newWorkMenuOpen ? 'rotate-180' : ''}`} /></button>{newWorkMenuOpen && <div className="absolute right-0 top-[calc(100%+8px)] z-[75] w-64 overflow-hidden rounded-2xl border border-slate-200 bg-white p-1.5 shadow-xl"><button onClick={() => { setNewWorkMenuOpen(false); requestTableImport() }} className="flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left transition hover:bg-indigo-50"><span className="grid h-9 w-9 place-items-center rounded-lg bg-indigo-100 text-indigo-600"><FileSpreadsheet size={17} /></span><span><b className="block text-sm text-slate-800">표 데이터에서 새 덱 만들기</b><small className="block pt-0.5 text-xs text-slate-500">Excel · CSV · TSV · TXT</small></span></button><button onClick={() => { setNewWorkMenuOpen(false); choosePackage() }} className="flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left transition hover:bg-slate-50"><span className="grid h-9 w-9 place-items-center rounded-lg bg-slate-100 text-slate-600"><FolderOpen size={17} /></span><span><b className="block text-sm text-slate-800">기존 파일 불러오기</b><small className="block pt-0.5 text-xs text-slate-500">APKG · 편집 프로젝트</small></span></button></div>}</div></>}</div>
         </header>
-        <div className={`min-h-0 flex-1 px-3 ${page === 'preview' ? 'pb-0' : 'pb-4'} ${!workspace || page === 'design' || page === 'media' || page === 'preview' ? 'overflow-hidden' : 'overflow-y-auto'}`}>{!workspace ? <Welcome onOpen={choosePackage} busy={busy} dragActive={dragActive} /> : page === 'overview' ? <Overview workspace={workspace} selected={selected} onPage={setPage} onSelect={(id) => { void selectNoteType(id) }} onDeleteNoteType={(id) => mutate(() => api.deleteNoteType(id), '빈 노트 유형을 제거했습니다. 저장하면 APKG에 반영됩니다.')} onMoveNotes={async (fromId, toId, mapping) => { try { const result = await api.moveNotes(fromId, toId, mapping); hydrate(result.workspace); setDirty(true); notify(`${result.moved.toLocaleString()}개 카드를 옮겼습니다.`); } catch (caught) { setError(caught instanceof Error ? caught.message : '카드를 옮기지 못했습니다.'); throw caught } }} /> : page === 'data' ? <DataPage noteType={selected} onUpdate={updateCell} /> : page === 'fields' ? <FieldsPage noteType={selected} onRename={async (order, name) => { await mutate(() => api.updateField(selected!.id, order, name)) }} onAdd={async (name) => { await mutate(() => api.addField(selected!.id, name)) }} onDelete={async (order) => { await mutate(() => api.deleteField(selected!.id, order)) }} onReorder={async (order, newOrder) => { await mutate(() => api.reorderField(selected!.id, order, newOrder)) }} onMove={async (order, destination, mode) => { const result = await api.moveFieldContents(selected!.id, order, destination, mode); hydrate(result.workspace); setDirty(true); notify(`${result.changed.toLocaleString()}개 노트에서 내용을 이동했습니다.`); return result.changed }} onClone={async (name) => { await mutate(async () => { const next = await api.cloneNoteType(selected!.id, name, true); setPage('overview'); return next }, '카드를 새 노트 유형으로 옮겼습니다. 저장하면 APKG에 반영됩니다.') }} /> : page === 'media' ? <MediaPage onExport={() => exportFile('media')} /> : page === 'design' ? <DesignPage noteType={selected} index={templateIndex} setIndex={setTemplateIndex} onSave={async (mode, value) => { await mutate(() => mode === 'css' ? api.updateCss(selected!.id, value) : api.updateTemplate(selected!.id, templateIndex, { [mode]: value }), '카드 디자인을 적용했습니다.') }} notify={notify} /> : <PreviewPage noteType={selected} side={side} setSide={setSide} noteIndex={noteIndex} setNoteIndex={setNoteIndex} previewHtml={previewHtml} />}</div>
+        <div className={`min-h-0 flex-1 px-3 ${page === 'preview' ? 'pb-0' : 'pb-4'} ${!workspace || page === 'design' || page === 'media' || page === 'preview' ? 'overflow-hidden' : 'overflow-y-auto'}`}>{!workspace ? <Welcome onOpen={choosePackage} busy={busy} dragActive={dragActive} /> : page === 'overview' ? <Overview workspace={workspace} selected={selected} onPage={setPage} onSelect={(id) => { void selectNoteType(id) }} onDeleteNoteType={(id) => mutate(() => api.deleteNoteType(id), '빈 노트 유형을 제거했습니다. 저장하면 APKG에 반영됩니다.')} onMoveNotes={async (fromId, toId, mapping) => { try { const result = await api.moveNotes(fromId, toId, mapping); hydrate(result.workspace); setDirty(true); notify(`${result.moved.toLocaleString()}개 카드를 옮겼습니다.`); } catch (caught) { setError(caught instanceof Error ? caught.message : '카드를 옮기지 못했습니다.'); throw caught } }} /> : page === 'data' ? <DataPage noteType={selected} onUpdate={updateCell} /> : page === 'fields' ? <FieldsPage noteType={selected} onRename={async (order, name) => { await mutate(() => api.updateField(selected!.id, order, name)) }} onAdd={async (name) => { await mutate(() => api.addField(selected!.id, name)) }} onDelete={async (order) => { await mutate(() => api.deleteField(selected!.id, order)) }} onReorder={async (order, newOrder) => { await mutate(() => api.reorderField(selected!.id, order, newOrder)) }} onMove={async (order, destination, mode) => { const result = await api.moveFieldContents(selected!.id, order, destination, mode); hydrate(result.workspace); setDirty(true); notify(`${result.changed.toLocaleString()}개 노트에서 내용을 이동했습니다.`); return result.changed }} onClone={async (name) => { await mutate(async () => { const next = await api.cloneNoteType(selected!.id, name, true); setPage('overview'); return next }, '카드를 새 노트 유형으로 옮겼습니다. 저장하면 APKG에 반영됩니다.') }} /> : page === 'media' ? <MediaPage onExport={() => exportFile('media')} /> : page === 'design' ? <DesignPage noteType={selected} index={templateIndex} setIndex={setTemplateIndex} onSave={async (mode, value) => { await mutate(() => mode === 'css' ? api.updateCss(selected!.id, value) : api.updateTemplate(selected!.id, templateIndex, { [mode]: value }), '카드 디자인을 적용했습니다.') }} notify={notify} /> : <PreviewPage noteType={selected} previewState={previewState} previewKey={activePreviewKey} previewHtml={activePreviewHtml} onSide={(side) => dispatchPreview({ type: 'select-side', side })} onNavigate={(delta) => dispatchPreview({ type: 'navigate', delta, total: selected?.notes.length ?? 0 })} />}</div>
       </section>
     </div>
     {toast && <div className={`fixed bottom-7 left-1/2 z-[70] -translate-x-1/2 rounded-xl bg-[#0b1426] px-5 py-3 text-sm font-semibold text-white shadow-2xl ring-1 ring-white/10 transition-opacity duration-300 ${toastVisible ? 'opacity-100' : 'opacity-0'}`}><span className="mr-2 text-emerald-400">✓</span>{toast}</div>}
@@ -1338,22 +1348,23 @@ function DesignPage({ noteType, index, setIndex, onSave, notify }: { noteType?: 
   </div>
 }
 
-function PreviewPage({ noteType, side, setSide, noteIndex, setNoteIndex, previewHtml }: { noteType?: NoteType; side: 'front' | 'back'; setSide: (side: 'front' | 'back') => void; noteIndex: number; setNoteIndex: (index: number) => void; previewHtml: string }) {
+function PreviewPage({ noteType, previewState, previewKey, previewHtml, onSide, onNavigate }: { noteType?: NoteType; previewState: typeof initialPreviewState; previewKey: string; previewHtml: string | null; onSide: (side: PreviewSide) => void; onNavigate: (delta: -1 | 1) => void }) {
   if (!noteType) return null
   const total = Math.max(noteType.notes.length, 1)
+  const { noteIndex, side } = previewState
   const audioScript = `<script>(()=>{let currentAudio=null,currentButton=null;const mark=(button,active)=>{button.classList.toggle('playing',active);button.setAttribute('aria-pressed',String(active))};document.querySelectorAll('.anki-audio').forEach(button=>{let audio;const finish=()=>{mark(button,false);if(currentAudio===audio){currentAudio=null;currentButton=null}};button.addEventListener('click',()=>{if(!audio){audio=new Audio(button.dataset.audio);audio.preload='auto';audio.onended=finish;audio.onerror=finish}if(currentAudio&&currentAudio!==audio){currentAudio.pause();currentAudio.currentTime=0;if(currentButton)mark(currentButton,false)}if(audio.paused){if(audio.ended)audio.currentTime=0;currentAudio=audio;currentButton=button;audio.play().then(()=>mark(button,true)).catch(finish)}else{audio.pause();finish()}})})})()</script>`
-  const doc = `<!doctype html><html><head><style>html,body{height:100%;margin:0}body{background:#fff}#anki-card{min-height:100%;box-sizing:border-box}</style></head><body class="card"><div id="anki-card" class="card">${previewHtml}</div>${audioScript}</body></html>`
+  const doc = previewHtml === null ? null : `<!doctype html><html><head><style>html,body{height:100%;margin:0}body{background:#fff}#anki-card{min-height:100%;box-sizing:border-box}</style></head><body class="card"><div id="anki-card" class="card">${previewHtml}</div>${audioScript}</body></html>`
   return <div className="mx-auto grid h-full min-h-[480px] max-w-[1420px] gap-3 lg:min-h-[620px] lg:grid-cols-[minmax(0,1fr)_230px] lg:gap-5 xl:grid-cols-[minmax(0,1fr)_250px]">
     <section className="grid min-h-0 place-items-center rounded-[20px] bg-[#172033] p-3 lg:rounded-[26px] lg:p-5">
       <div className="flex h-[min(72vh,710px)] max-h-full w-full max-w-[580px] flex-col overflow-hidden rounded-[24px] border-[6px] border-[#0a0f1d] bg-white shadow-2xl lg:rounded-[32px] lg:border-[7px]">
         <div className="flex h-11 shrink-0 items-center justify-between border-b px-5 text-[11px] text-slate-400"><span className="h-2 w-2 rounded-full bg-emerald-400" /><b>ANKI 미리보기</b><span>{noteIndex + 1} / {total}</span></div>
-        <iframe title="카드 미리보기" sandbox="allow-scripts allow-same-origin" srcDoc={doc} className="h-full w-full border-0" />
+        {doc === null ? <div role="status" className="grid h-full place-items-center text-xs font-medium text-slate-400">카드를 불러오는 중…</div> : <iframe key={previewKey} title="카드 미리보기" sandbox="allow-scripts allow-same-origin" srcDoc={doc} className="h-full w-full border-0" />}
       </div>
     </section>
     <aside className="flex min-h-[170px] flex-col rounded-[18px] border border-slate-200/70 bg-white p-4 shadow-card lg:rounded-[22px] lg:p-5">
       <h2 className="text-lg font-semibold">실시간 미리보기</h2>
-      <div className="mt-4 grid grid-cols-2 rounded-xl bg-slate-100 p-1 lg:mt-6"><button onClick={() => setSide('front')} className={`rounded-lg py-2 text-xs font-semibold ${side === 'front' ? 'bg-white shadow-sm' : 'text-slate-400'}`}>앞면</button><button onClick={() => setSide('back')} className={`rounded-lg py-2 text-xs font-semibold ${side === 'back' ? 'bg-white shadow-sm' : 'text-slate-400'}`}>뒷면</button></div>
-      <div className="mt-auto grid grid-cols-2 gap-2"><button onClick={() => setNoteIndex((noteIndex - 1 + total) % total)} className="inline-flex items-center justify-center gap-2 rounded-xl border py-2.5 text-xs font-semibold"><ArrowLeft size={15} />이전</button><button onClick={() => setNoteIndex((noteIndex + 1) % total)} className="inline-flex items-center justify-center gap-2 rounded-xl bg-[#151d31] py-2.5 text-xs font-semibold text-white">다음<ArrowRight size={15} /></button></div>
+      <div className="mt-4 grid grid-cols-2 rounded-xl bg-slate-100 p-1 lg:mt-6"><button disabled={doc === null} onClick={() => onSide('front')} className={`rounded-lg py-2 text-xs font-semibold disabled:cursor-wait disabled:opacity-50 ${side === 'front' ? 'bg-white shadow-sm' : 'text-slate-400'}`}>앞면</button><button disabled={doc === null} onClick={() => onSide('back')} className={`rounded-lg py-2 text-xs font-semibold disabled:cursor-wait disabled:opacity-50 ${side === 'back' ? 'bg-white shadow-sm' : 'text-slate-400'}`}>뒷면</button></div>
+      <div className="mt-auto grid grid-cols-2 gap-2"><button disabled={doc === null} onClick={() => onNavigate(-1)} className="inline-flex items-center justify-center gap-2 rounded-xl border py-2.5 text-xs font-semibold disabled:cursor-wait disabled:opacity-50"><ArrowLeft size={15} />이전</button><button disabled={doc === null} onClick={() => onNavigate(1)} className="inline-flex items-center justify-center gap-2 rounded-xl bg-[#151d31] py-2.5 text-xs font-semibold text-white disabled:cursor-wait disabled:opacity-50">다음<ArrowRight size={15} /></button></div>
     </aside>
   </div>
 }
