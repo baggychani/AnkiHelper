@@ -125,7 +125,10 @@ class BackendApiTests(unittest.TestCase):
             self.assertEqual(["Extra", "Question", "Back"], [field["name"] for field in reordered.json()["note_types"][0]["fields"]])
 
             save_path = self.root / "saved.apkg"
-            saved = client.post("/api/packages/save", json={"path": str(save_path)})
+            backup_dir = self.root / "backups"
+            backup_dir.mkdir()
+            with patch("anki_helper.anki_package._backup_dir", return_value=backup_dir):
+                saved = client.post("/api/packages/save", json={"path": str(save_path)})
             self.assertEqual(200, saved.status_code, saved.text)
             self.assertTrue(save_path.is_file())
             self.assertEqual(str(save_path), saved.json()["saved_to"])
@@ -243,7 +246,25 @@ class BackendApiTests(unittest.TestCase):
                 params={"side": "back"},
             ).json()["html"]
             self.assertIn("class='replay-button anki-audio sound'", preview)
-            self.assertIn("<svg viewBox='0 0 48 48'", preview)
+            self.assertIn("aria-label='음성 재생'><span><svg", preview)
+            self.assertIn("<svg class='playImage' viewBox='0 0 64 64'", preview)
+            self.assertIn("<circle cx='32' cy='32' r='29'/>", preview)
+            self.assertIn(".replay-button span{display:inline-flex", preview)
+
+    def test_preview_does_not_autoplay_frontside_audio_again_on_answer(self) -> None:
+        with TestClient(backend.app) as client:
+            _workspace, note_type_id = self._open_workspace(client)
+            client.patch(
+                f"/api/note-types/{note_type_id}/notes/0/fields/0",
+                json={"value": "[sound:answer.mp3]"},
+            )
+            preview = client.get(
+                f"/api/note-types/{note_type_id}/preview",
+                params={"side": "back"},
+            ).json()["html"]
+
+            self.assertEqual(2, preview.count("class='replay-button anki-audio sound'"))
+            self.assertEqual(1, preview.count("data-autoplay='false'"))
 
     def test_preview_resolves_quoted_sound_filenames_safely(self) -> None:
         sound = self.root / "teacher's answer.mp3"
@@ -266,18 +287,41 @@ class BackendApiTests(unittest.TestCase):
     def test_preview_resolves_dynamic_template_media_assignments(self) -> None:
         asset = self.root / "badge.svg"
         asset.write_text('<svg xmlns="http://www.w3.org/2000/svg"/>', encoding="utf-8")
+        stylesheet = self.root / "theme.css"
+        stylesheet.write_text('.badge{background:url("_badge.svg")}', encoding="utf-8")
 
         with TestClient(backend.app) as client:
             _workspace, note_type_id = self._open_workspace(client)
-            client.post("/api/media/import", json={"paths": [str(asset)], "template_asset": True})
+            client.post(
+                "/api/media/import",
+                json={"paths": [str(asset), str(stylesheet)], "template_asset": True},
+            )
             client.patch(
                 f"/api/note-types/{note_type_id}/templates/0",
-                json={"front": '<script>const filename = "_badge.svg"; image.src = filename</script>'},
+                json={
+                    "front": (
+                        '<script>const filename = "./_badge.svg"; image.src = filename;'
+                        'image.srcset = `${filename} 1x, _badge.svg 2x`;'
+                        'const panel = document.createElement("div");'
+                        'panel.style.backgroundImage = `url("${filename}")`; document.body.append(panel);'
+                        'const style = document.createElement("style");'
+                        'style.textContent = `.badge{background:url("${filename}")}`; document.head.append(style);'
+                        'const link = document.createElement("link"); link.rel = "stylesheet";'
+                        'link.href = "_theme.css"; document.head.append(link);'
+                        "</script>"
+                    )
+                },
             )
             preview = client.get(f"/api/note-types/{note_type_id}/preview").json()["html"]
 
             self.assertIn('"_badge.svg":', preview)
+            self.assertRegex(preview, r'"_theme\.css":\s*"data:text/css;base64,')
+            self.assertIn('image.srcset = `${filename} 1x, _badge.svg 2x`', preview)
             self.assertIn('patch(HTMLImageElement.prototype,"src")', preview)
+            self.assertIn('patch(HTMLImageElement.prototype,"srcset",resolveSrcset)', preview)
+            self.assertIn('patch(CSSStyleDeclaration.prototype,property,resolveCss)', preview)
+            self.assertIn('attributeFilter:["src","srcset","poster","href","style"]', preview)
+            self.assertIn("element instanceof HTMLStyleElement", preview)
             self.assertLess(preview.index('patch(HTMLImageElement.prototype,"src")'), preview.index("image.src = filename"))
 
     def test_preview_preserves_storage_between_iframe_documents(self) -> None:

@@ -155,6 +155,35 @@ class MediaWorkflowTests(unittest.TestCase):
             ),
         )
 
+    def test_preview_renders_common_anki_filters_and_special_fields(self) -> None:
+        fields = self.package.note_types[0].fields
+        values = ["<b>Question</b>", "東京[とうきょう]"]
+
+        front = render_template(
+            "{{text:Front}} · {{furigana:Back}} · {{type:Back}} · {{Type}} · {{Card}}",
+            fields,
+            values,
+            special_values={"Type": "Basic", "Card": "Card 1"},
+        )
+        answer = render_template("{{type:Back}}", fields, values, is_answer=True)
+
+        self.assertIn("Question", front)
+        self.assertNotIn("<b>", front)
+        self.assertIn("<ruby>東京<rt>とうきょう</rt></ruby>", front)
+        self.assertIn('id="typeans" type="text"', front)
+        self.assertIn("Basic · Card 1", front)
+        self.assertEqual('<code id="typeans">東京[とうきょう]</code>', answer)
+
+    def test_preview_renders_basic_cloze_on_question_and_answer(self) -> None:
+        fields = self.package.note_types[0].fields
+        values = ["{{c1::Istanbul::city}} and {{c2::Ankara}}", ""]
+
+        question = render_template("{{cloze:Front}}", fields, values)
+        answer = render_template("{{cloze:Front}}", fields, values, is_answer=True)
+
+        self.assertEqual('<span class="cloze">[city]</span> and Ankara', question)
+        self.assertEqual('<span class="cloze">Istanbul</span> and Ankara', answer)
+
     def test_media_health_resolves_url_encoded_references_and_reports_missing(self) -> None:
         special = self.root / "badge 100%.svg"
         unused = self.root / "unused.mp3"
@@ -172,14 +201,21 @@ class MediaWorkflowTests(unittest.TestCase):
         self.assertEqual(["unused.mp3"], [item["name"] for item in report["unused"]])
 
     def test_media_health_recognizes_template_script_asset_names(self) -> None:
-        import_media(self.package, [self.asset], template_asset=True)
-        self.package.note_types[0].templates[0].front = '<script>const characters = ["_badge.svg"]</script>'
+        arbitrary_asset = self.root / "model.bin"
+        arbitrary_asset.write_bytes(b"model")
+        import_media(self.package, [self.asset, arbitrary_asset], template_asset=True)
+        self.package.note_types[0].templates[0].front = (
+            '<script>const characters = ["_badge.svg", "_model.bin"]; '
+            'document.getElementById("random-character").classList.add("visible")</script>'
+        )
 
         report = media_health(self.package)
 
         self.assertIn("_badge.svg", report["references"])
+        self.assertIn("_model.bin", report["references"])
         self.assertEqual([], report["static_unreferenced"])
         self.assertEqual("script", report["references"]["_badge.svg"][0]["source"])
+        self.assertEqual([], report["missing"])
 
     def test_import_normalizes_sync_unsafe_filename_and_case_collisions(self) -> None:
         self.assertEqual("a_b_.svg", _safe_media_name("a:b?.svg"))

@@ -22,7 +22,7 @@ from urllib.parse import unquote
 from uuid import uuid4
 
 
-FIELD_TOKEN = re.compile(r"{{(?:#|\^)?\s*([^{}:#]+?)(?::[^{}]+)?\s*}}")
+FIELD_TOKEN = re.compile(r"{{\s*(?![#^/])([^{}]+?)\s*}}")
 CONDITIONAL_SECTION = re.compile(
     r"{{(?P<kind>[#^])\s*(?P<name>[^{}:#]+?)\s*}}(?P<body>.*?){{/\s*(?P=name)\s*}}",
     re.DOTALL,
@@ -45,6 +45,12 @@ CSS_URL_REFERENCE = re.compile(r"url\(\s*(?:[\"'](?P<quoted>.*?)[\"']|(?P<bare>[
 CSS_IMPORT_REFERENCE = re.compile(r"@import\s+(?:[\"'](?P<quoted>.*?)[\"']|url\(\s*[\"']?(?P<bare>[^)\s\"']+)[\"']?\s*\))", re.IGNORECASE)
 SCRIPT_CONTENT = re.compile(r"<script\b[^>]*>(?P<body>.*?)</script\s*>", re.IGNORECASE | re.DOTALL)
 SCRIPT_STRING = re.compile(r"(?P<quote>[\"'])(?P<value>(?:\\.|(?!\1).)*)(?P=quote)", re.DOTALL)
+MEDIA_FILE_EXTENSIONS = {
+    ".aac", ".aif", ".aiff", ".apng", ".avif", ".avi", ".bmp", ".css", ".eot", ".flac",
+    ".gif", ".ico", ".jpeg", ".jpg", ".js", ".m4a", ".m4v", ".mov", ".mp3", ".mp4", ".oga",
+    ".ogg", ".ogv", ".opus", ".otf", ".png", ".svg", ".ttf", ".wav", ".webm", ".webp", ".wma",
+    ".woff", ".woff2",
+}
 WINDOWS_RESERVED_FILENAMES = {
     "CON", "PRN", "AUX", "NUL", *(f"COM{index}" for index in range(1, 10)), *(f"LPT{index}" for index in range(1, 10)),
 }
@@ -1025,7 +1031,7 @@ def create_package_from_table(
     )
     requirements = []
     for index, card_template in enumerate(templates):
-        tokens = [match.strip() for match in FIELD_TOKEN.findall(card_template["qfmt"])]
+        tokens = [match.rsplit(":", 1)[-1].strip() for match in FIELD_TOKEN.findall(card_template["qfmt"])]
         order = next((index for index, name in enumerate(clean_fields) if name in tokens), front_field)
         requirements.append([index, "any", [order]])
     model = {
@@ -1152,18 +1158,96 @@ CREATE INDEX ix_revlog_cid ON revlog (cid);
 """
 
 
-def render_template(template: str, fields: list[Field], values: list[str], front_html: str = "") -> str:
-    """A deliberately small, predictable preview renderer for common Anki fields."""
+def render_template(
+    template: str,
+    fields: list[Field],
+    values: list[str],
+    front_html: str = "",
+    *,
+    is_answer: bool = False,
+    special_values: dict[str, str] | None = None,
+) -> str:
+    """Render common Anki field syntax closely enough for a faithful preview.
+
+    Unknown filters deliberately fall back to the underlying field instead of
+    hiding it.  Client-specific features such as TTS can then remain visible in
+    the Helper even when the desktop WebView cannot emulate the native player.
+    """
     field_values = {
         field.name: values[field.order] if field.order < len(values) else ""
         for field in fields
     }
+    special_values = special_values or {}
+
+    def plain_text(value: str) -> str:
+        text = re.sub(r"<br\s*/?>", "\n", value, flags=re.IGNORECASE)
+        text = re.sub(r"<[^>]+>", "", text)
+        return html.escape(html.unescape(text)).replace("\n", "<br>")
+
+    def cloze_text(value: str) -> str:
+        def replace_cloze(match: re.Match[str]) -> str:
+            ordinal = int(match.group("ordinal"))
+            content = match.group("content")
+            hint = match.group("hint") or "..."
+            if is_answer:
+                return f'<span class="cloze">{content}</span>' if ordinal == 1 else content
+            return f'<span class="cloze">[{hint}]</span>' if ordinal == 1 else content
+
+        return re.sub(
+            r"{{c(?P<ordinal>\d+)::(?P<content>.*?)(?:::(?P<hint>.*?))?}}",
+            replace_cloze,
+            value,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+
+    def furigana(value: str, mode: str) -> str:
+        def replace_ruby(match: re.Match[str]) -> str:
+            base, reading = match.group("base"), match.group("reading")
+            if mode == "kana":
+                return reading
+            if mode == "kanji":
+                return base
+            return f"<ruby>{base}<rt>{reading}</rt></ruby>"
+
+        return re.sub(r"(?P<base>[^\s<>\[]+)\[(?P<reading>[^\]]+)]", replace_ruby, value)
+
+    def apply_filter(filter_name: str, value: str) -> str:
+        name = filter_name.strip().split(maxsplit=1)[0].casefold()
+        if name == "text":
+            return plain_text(value)
+        if name == "cloze":
+            return cloze_text(value)
+        if name in {"furigana", "kana", "kanji"}:
+            return furigana(value, name)
+        if name == "hint":
+            return (
+                f'<details class="hint"><summary>힌트 보기</summary>{value}</details>'
+                if value.strip()
+                else ""
+            )
+        if name == "type":
+            return (
+                f'<code id="typeans">{plain_text(value)}</code>'
+                if is_answer
+                else '<input id="typeans" type="text" autocomplete="off" aria-label="정답 입력">'
+            )
+        return value
 
     def replace(match: re.Match[str]) -> str:
-        name = match.group(1).strip()
+        token = match.group(1).strip()
+        parts = [part.strip() for part in token.split(":")]
+        name, filters = parts[-1], parts[:-1]
         if name == "FrontSide":
-            return front_html
-        value = field_values.get(name, "")
+            # Anki does not autoplay question audio copied into the answer by
+            # {{FrontSide}}, but its replay control remains clickable.
+            return re.sub(
+                r'(<span class="sound"\s+)(data-sound=)',
+                r'\1data-anki-autoplay="false" \2',
+                front_html,
+            )
+        value = field_values.get(name, special_values.get(name, ""))
+        for filter_name in reversed(filters):
+            value = apply_filter(filter_name, value)
         # Preserve stored HTML but make plain TSV text readable in preview.
         return value.replace("\n", "<br>")
 
@@ -1411,8 +1495,13 @@ def media_health(package: DeckPackage) -> dict[str, Any]:
             filename = media_reference_filename(raw)
             if filename is None:
                 continue
-            reference = MediaReference(filename=filename, location=location, source="script" if dynamic else source)
             actual_name = available.get(filename)
+            if dynamic and actual_name is None and Path(filename).suffix.casefold() not in MEDIA_FILE_EXTENSIONS:
+                # JavaScript contains many non-file strings (DOM ids, storage
+                # keys, class names). Report only known media-like missing
+                # paths, while any filename that actually exists stays valid.
+                continue
+            reference = MediaReference(filename=filename, location=location, source="script" if dynamic else source)
             if actual_name:
                 references.setdefault(actual_name, []).append(reference)
             else:

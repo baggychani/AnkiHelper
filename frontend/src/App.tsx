@@ -7,12 +7,12 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import {
   AlertTriangle, ArrowLeft, ArrowRight, ArrowRightLeft, BookOpen, Braces, Check, ChevronDown, ChevronRight, ChevronUp, Code2, Copy,
   ArrowUpRight, Download, FileArchive, FolderOpen, Grid2X2, HardDrive,
-  FileSpreadsheet, Image, Layers3, ListChecks, LoaderCircle, LogOut, Music2, Palette, PanelLeft,
-  Play, Plus, RotateCcw, Save, ScanSearch, Sparkles, Table2, Trash2, Type, X,
+  FileSpreadsheet, Image, Layers3, ListChecks, LoaderCircle, LogOut, Monitor, Moon, Music2, Palette, PanelLeft,
+  Play, Plus, RotateCcw, Save, ScanSearch, Smartphone, Sparkles, Sun, Table2, Trash2, Type, X,
 } from 'lucide-react'
 import { api, type Field, type MediaHealth, type MediaItem, type NoteType, type SourceNoteType, type TablePreview, type Workspace } from './api'
 import { initialPreviewState, previewReducer, previewRequestKey, type PreviewSide } from './previewLifecycle'
-import { buildPreviewDocument } from './previewAudio'
+import { buildPreviewDocument, type PreviewPlatform } from './previewAudio'
 
 type Page = 'overview' | 'data' | 'fields' | 'media' | 'design' | 'preview'
 type EditorMode = 'front' | 'back' | 'css'
@@ -416,7 +416,7 @@ function App() {
           </div>
           <div className="flex shrink-0 items-center gap-2">{workspace && <><button onClick={persist} disabled={busy || !dirty} className={`inline-flex h-9 items-center gap-2 rounded-xl px-3 text-xs font-semibold transition lg:h-10 lg:px-4 ${dirty ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-500/20' : 'border border-slate-200 bg-white text-slate-400'}`}>{busy ? <LoaderCircle className="animate-spin" size={16} /> : <Save size={16} />}{dirty ? '저장' : '저장됨'}<span className="hidden text-[10px] opacity-65 lg:inline">Ctrl+S</span></button><div ref={newWorkMenuRef} className="relative"><button onClick={() => setNewWorkMenuOpen((open) => !open)} disabled={busy} className="inline-flex h-9 items-center gap-2 rounded-xl bg-[#11182a] px-3 text-xs font-semibold text-white transition hover:bg-[#202b45] lg:h-10 lg:px-4"><Plus size={16} /><span>새 작업</span><ChevronDown size={14} className={`transition ${newWorkMenuOpen ? 'rotate-180' : ''}`} /></button>{newWorkMenuOpen && <div className="absolute right-0 top-[calc(100%+8px)] z-[75] w-64 overflow-hidden rounded-2xl border border-slate-200 bg-white p-1.5 shadow-xl"><button onClick={() => { setNewWorkMenuOpen(false); requestTableImport() }} className="flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left transition hover:bg-indigo-50"><span className="grid h-9 w-9 place-items-center rounded-lg bg-indigo-100 text-indigo-600"><FileSpreadsheet size={17} /></span><span><b className="block text-sm text-slate-800">표 데이터에서 새 덱 만들기</b><small className="block pt-0.5 text-xs text-slate-500">Excel · CSV · TSV · TXT</small></span></button><button onClick={() => { setNewWorkMenuOpen(false); choosePackage() }} className="flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left transition hover:bg-slate-50"><span className="grid h-9 w-9 place-items-center rounded-lg bg-slate-100 text-slate-600"><FolderOpen size={17} /></span><span><b className="block text-sm text-slate-800">기존 파일 불러오기</b><small className="block pt-0.5 text-xs text-slate-500">APKG · 편집 프로젝트</small></span></button></div>}</div></>}</div>
         </header>
-        <div className={`min-h-0 flex-1 px-3 ${page === 'preview' ? 'pb-0' : 'pb-4'} ${!workspace || page === 'design' || page === 'media' || page === 'preview' ? 'overflow-hidden' : 'overflow-y-auto'}`}>{!workspace ? <Welcome onOpen={choosePackage} busy={busy} dragActive={dragActive} /> : page === 'overview' ? <Overview workspace={workspace} selected={selected} onPage={setPage} onSelect={(id) => { void selectNoteType(id) }} onDeleteNoteType={(id) => mutate(() => api.deleteNoteType(id), '빈 노트 유형을 제거했습니다. 저장하면 APKG에 반영됩니다.')} onMoveNotes={async (fromId, toId, mapping) => { try { const result = await api.moveNotes(fromId, toId, mapping); hydrate(result.workspace); setDirty(true); notify(`${result.moved.toLocaleString()}개 카드를 옮겼습니다.`); } catch (caught) { setError(caught instanceof Error ? caught.message : '카드를 옮기지 못했습니다.'); throw caught } }} /> : page === 'data' ? <DataPage noteType={selected} onUpdate={updateCell} /> : page === 'fields' ? <FieldsPage noteType={selected} onRename={async (order, name) => { await mutate(() => api.updateField(selected!.id, order, name)) }} onAdd={async (name) => { await mutate(() => api.addField(selected!.id, name)) }} onDelete={async (order) => { await mutate(() => api.deleteField(selected!.id, order)) }} onReorder={async (order, newOrder) => { await mutate(() => api.reorderField(selected!.id, order, newOrder)) }} onMove={async (order, destination, mode) => { const result = await api.moveFieldContents(selected!.id, order, destination, mode); hydrate(result.workspace); setDirty(true); notify(`${result.changed.toLocaleString()}개 노트에서 내용을 이동했습니다.`); return result.changed }} onClone={async (name) => { await mutate(async () => { const next = await api.cloneNoteType(selected!.id, name, true); setPage('overview'); return next }, '카드를 새 노트 유형으로 옮겼습니다. 저장하면 APKG에 반영됩니다.') }} /> : page === 'media' ? <MediaPage onExport={() => exportFile('media')} /> : page === 'design' ? <DesignPage noteType={selected} index={templateIndex} setIndex={setTemplateIndex} onSave={async (mode, value) => { await mutate(() => mode === 'css' ? api.updateCss(selected!.id, value) : api.updateTemplate(selected!.id, templateIndex, { [mode]: value }), '카드 디자인을 적용했습니다.') }} notify={notify} /> : <PreviewPage noteType={selected} previewState={previewState} previewKey={activePreviewKey} previewHtml={activePreviewHtml} onSide={(side) => dispatchPreview({ type: 'select-side', side })} onNavigate={(delta) => dispatchPreview({ type: 'navigate', delta, total: selected?.notes.length ?? 0 })} />}</div>
+        <div className={`min-h-0 flex-1 px-3 ${page === 'preview' ? 'pb-0' : 'pb-4'} ${!workspace || page === 'design' || page === 'media' || page === 'preview' ? 'overflow-hidden' : 'overflow-y-auto'}`}>{!workspace ? <Welcome onOpen={choosePackage} busy={busy} dragActive={dragActive} /> : page === 'overview' ? <Overview workspace={workspace} selected={selected} onPage={setPage} onSelect={(id) => { void selectNoteType(id) }} onDeleteNoteType={(id) => mutate(() => api.deleteNoteType(id), '빈 노트 유형을 제거했습니다. 저장하면 APKG에 반영됩니다.')} onMoveNotes={async (fromId, toId, mapping) => { try { const result = await api.moveNotes(fromId, toId, mapping); hydrate(result.workspace); setDirty(true); notify(`${result.moved.toLocaleString()}개 카드를 옮겼습니다.`); } catch (caught) { setError(caught instanceof Error ? caught.message : '카드를 옮기지 못했습니다.'); throw caught } }} /> : page === 'data' ? <DataPage noteType={selected} onUpdate={updateCell} /> : page === 'fields' ? <FieldsPage noteType={selected} onRename={async (order, name) => { await mutate(() => api.updateField(selected!.id, order, name)) }} onAdd={async (name) => { await mutate(() => api.addField(selected!.id, name)) }} onDelete={async (order) => { await mutate(() => api.deleteField(selected!.id, order)) }} onReorder={async (order, newOrder) => { await mutate(() => api.reorderField(selected!.id, order, newOrder)) }} onMove={async (order, destination, mode) => { const result = await api.moveFieldContents(selected!.id, order, destination, mode); hydrate(result.workspace); setDirty(true); notify(`${result.changed.toLocaleString()}개 노트에서 내용을 이동했습니다.`); return result.changed }} onClone={async (name) => { await mutate(async () => { const next = await api.cloneNoteType(selected!.id, name, true); setPage('overview'); return next }, '카드를 새 노트 유형으로 옮겼습니다. 저장하면 APKG에 반영됩니다.') }} /> : page === 'media' ? <MediaPage onExport={() => exportFile('media')} /> : page === 'design' ? <DesignPage noteType={selected} index={templateIndex} setIndex={setTemplateIndex} onSave={async (mode, value) => { await mutate(() => mode === 'css' ? api.updateCss(selected!.id, value) : api.updateTemplate(selected!.id, templateIndex, { [mode]: value }), '카드 디자인을 적용했습니다.') }} notify={notify} /> : <PreviewPage noteType={selected} templateIndex={templateIndex} previewState={previewState} previewKey={activePreviewKey} previewHtml={activePreviewHtml} onSide={(side) => dispatchPreview({ type: 'select-side', side })} onNavigate={(delta) => dispatchPreview({ type: 'navigate', delta, total: selected?.notes.length ?? 0 })} />}</div>
       </section>
     </div>
     {toast && <div className={`fixed bottom-7 left-1/2 z-[70] -translate-x-1/2 rounded-xl bg-[#0b1426] px-5 py-3 text-sm font-semibold text-white shadow-2xl ring-1 ring-white/10 transition-opacity duration-300 ${toastVisible ? 'opacity-100' : 'opacity-0'}`}><span className="mr-2 text-emerald-400">✓</span>{toast}</div>}
@@ -619,13 +619,17 @@ function TemplateFieldMappingModal({ columns, names, destination, mapping, activ
 
 function SideAction({ label, icon: Icon, compact, disabled, onClick }: { label: string; icon: typeof Download; compact: boolean; disabled?: boolean; onClick: () => void }) { return <button disabled={disabled} onClick={onClick} title={label} className="flex h-9 w-full items-center rounded-xl px-3 text-[11px] font-medium text-slate-500 transition hover:bg-white/[.055] hover:text-slate-200 disabled:opacity-30"><Icon size={16} /><span className={`${compact ? 'w-0 opacity-0' : 'ml-3 opacity-100'} whitespace-nowrap transition-all`}>{label}</span></button> }
 
+/** Keep pointer-tracking code wired up, but leave off until the effect is re-enabled. */
+const WELCOME_POINTER_TRACKING_ENABLED = false
+
 function Welcome({ onOpen, busy, dragActive }: { onOpen: () => void; busy: boolean; dragActive: boolean }) {
   const rootRef = useRef<HTMLDivElement>(null)
   const targetRef = useRef({ x: 50, y: 50 })
   const currentRef = useRef({ x: 50, y: 50 })
   const frameRef = useRef<number>()
   const motionEnabledRef = useRef(
-    typeof window !== 'undefined'
+    WELCOME_POINTER_TRACKING_ENABLED
+      && typeof window !== 'undefined'
       && typeof window.matchMedia === 'function'
       && !window.matchMedia('(prefers-reduced-motion: reduce)').matches,
   )
@@ -676,7 +680,7 @@ function Welcome({ onOpen, busy, dragActive }: { onOpen: () => void; busy: boole
   return (
     <div
       ref={rootRef}
-      className={`welcome-shell relative grid h-full min-h-0 place-items-center overflow-hidden rounded-[22px] bg-[#0d1425] px-5 transition lg:rounded-[28px] lg:px-6 ${dragActive ? 'ring-2 ring-cyan-200/80 ring-offset-4 ring-offset-[#eef1f7]' : ''}`}
+      className={`welcome-shell relative grid h-full min-h-0 place-items-center overflow-hidden rounded-[22px] bg-[#0d1425] px-5 transition lg:rounded-[28px] lg:px-6 ${WELCOME_POINTER_TRACKING_ENABLED ? '' : 'welcome-pointer-tracking-off'} ${dragActive ? 'ring-2 ring-cyan-200/80 ring-offset-4 ring-offset-[#eef1f7]' : ''}`}
       style={{ '--welcome-x': '50%', '--welcome-y': '50%', '--welcome-drift-x': '0px', '--welcome-drift-y': '0px' } as React.CSSProperties}
       onPointerMove={(event) => setPointerTarget(event.clientX, event.clientY)}
       onPointerLeave={resetPointer}
@@ -1449,21 +1453,32 @@ function DesignPage({ noteType, index, setIndex, onSave, notify }: { noteType?: 
   </div>
 }
 
-function PreviewPage({ noteType, previewState, previewKey, previewHtml, onSide, onNavigate }: { noteType?: NoteType; previewState: typeof initialPreviewState; previewKey: string; previewHtml: string | null; onSide: (side: PreviewSide) => void; onNavigate: (delta: -1 | 1) => void }) {
+function PreviewPage({ noteType, templateIndex, previewState, previewKey, previewHtml, onSide, onNavigate }: { noteType?: NoteType; templateIndex: number; previewState: typeof initialPreviewState; previewKey: string; previewHtml: string | null; onSide: (side: PreviewSide) => void; onNavigate: (delta: -1 | 1) => void }) {
+  const [platform, setPlatform] = useState<PreviewPlatform>('desktop')
+  const [nightMode, setNightMode] = useState(false)
   if (!noteType) return null
   const total = Math.max(noteType.notes.length, 1)
   const { noteIndex, side } = previewState
-  const doc = previewHtml === null ? null : buildPreviewDocument(previewHtml)
+  const doc = previewHtml === null ? null : buildPreviewDocument(previewHtml, { templateIndex, platform, nightMode })
+  const deviceLabel = platform === 'ankidroid' ? 'ANKIDROID' : 'ANKI PC'
   return <div className="mx-auto grid h-full min-h-[480px] max-w-[1420px] gap-3 lg:min-h-[620px] lg:grid-cols-[minmax(0,1fr)_230px] lg:gap-5 xl:grid-cols-[minmax(0,1fr)_250px]">
     <section className="grid min-h-0 place-items-center rounded-[20px] bg-[#172033] p-3 lg:rounded-[26px] lg:p-5">
-      <div className="flex h-[min(72vh,710px)] max-h-full w-full max-w-[580px] flex-col overflow-hidden rounded-[24px] border-[6px] border-[#0a0f1d] bg-white shadow-2xl lg:rounded-[32px] lg:border-[7px]">
-        <div className="flex h-11 shrink-0 items-center justify-between border-b px-5 text-[11px] text-slate-400"><span className="h-2 w-2 rounded-full bg-emerald-400" /><b>ANKI 미리보기</b><span>{noteIndex + 1} / {total}</span></div>
-        {doc === null ? <div role="status" className="grid h-full place-items-center text-xs font-medium text-slate-400">카드를 불러오는 중…</div> : <iframe key={previewKey} title="카드 미리보기" sandbox="allow-scripts allow-same-origin" srcDoc={doc} className="h-full w-full border-0" />}
+      <div className={`flex h-[min(72vh,710px)] max-h-full w-full flex-col overflow-hidden border-[#0a0f1d] bg-white shadow-2xl transition-[max-width,border-radius,border-width] duration-300 ${platform === 'ankidroid' ? 'max-w-[430px] rounded-[30px] border-[8px]' : 'max-w-[820px] rounded-[24px] border-[6px] lg:rounded-[28px] lg:border-[7px]'}`}>
+        <div className="flex h-11 shrink-0 items-center justify-between border-b px-5 text-[11px] text-slate-400"><span className="h-2 w-2 rounded-full bg-emerald-400" /><b>{deviceLabel} 미리보기</b><span>{noteIndex + 1} / {total}</span></div>
+        {doc === null ? <div role="status" className="grid h-full place-items-center text-xs font-medium text-slate-400">카드를 불러오는 중…</div> : <iframe key={`${previewKey}:${platform}:${nightMode ? 'night' : 'day'}`} title="카드 미리보기" sandbox="allow-scripts allow-same-origin" srcDoc={doc} className="h-full w-full border-0" />}
       </div>
     </section>
     <aside className="flex min-h-[170px] flex-col rounded-[18px] border border-slate-200/70 bg-white p-4 shadow-card lg:rounded-[22px] lg:p-5">
       <h2 className="text-lg font-semibold">실시간 미리보기</h2>
       <div className="mt-4 grid grid-cols-2 rounded-xl bg-slate-100 p-1 lg:mt-6"><button disabled={doc === null} onClick={() => onSide('front')} className={`rounded-lg py-2 text-xs font-semibold disabled:cursor-wait disabled:opacity-50 ${side === 'front' ? 'bg-white shadow-sm' : 'text-slate-400'}`}>앞면</button><button disabled={doc === null} onClick={() => onSide('back')} className={`rounded-lg py-2 text-xs font-semibold disabled:cursor-wait disabled:opacity-50 ${side === 'back' ? 'bg-white shadow-sm' : 'text-slate-400'}`}>뒷면</button></div>
+      <div className="mt-5">
+        <p className="mb-2 text-[11px] font-semibold text-slate-400">표시 환경</p>
+        <div className="grid grid-cols-2 rounded-xl bg-slate-100 p-1">
+          <button type="button" aria-pressed={platform === 'desktop'} onClick={() => setPlatform('desktop')} className={`inline-flex items-center justify-center gap-1.5 rounded-lg py-2 text-[11px] font-semibold transition ${platform === 'desktop' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-400'}`}><Monitor size={14} />PC</button>
+          <button type="button" aria-pressed={platform === 'ankidroid'} onClick={() => setPlatform('ankidroid')} className={`inline-flex items-center justify-center gap-1.5 rounded-lg py-2 text-[11px] font-semibold transition ${platform === 'ankidroid' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-400'}`}><Smartphone size={14} />AnkiDroid</button>
+        </div>
+      </div>
+      <button type="button" aria-pressed={nightMode} onClick={() => setNightMode((enabled) => !enabled)} className="mt-3 inline-flex items-center justify-between rounded-xl border border-slate-200 px-3 py-2.5 text-xs font-semibold text-slate-600 transition hover:bg-slate-50"><span className="inline-flex items-center gap-2">{nightMode ? <Moon size={14} /> : <Sun size={14} />}야간 모드</span><span className={`h-4 w-7 rounded-full p-0.5 transition ${nightMode ? 'bg-indigo-600' : 'bg-slate-200'}`}><span className={`block h-3 w-3 rounded-full bg-white shadow-sm transition ${nightMode ? 'translate-x-3' : ''}`} /></span></button>
       <div className="mt-auto grid grid-cols-2 gap-2"><button disabled={doc === null} onClick={() => onNavigate(-1)} className="inline-flex items-center justify-center gap-2 rounded-xl border py-2.5 text-xs font-semibold disabled:cursor-wait disabled:opacity-50"><ArrowLeft size={15} />이전</button><button disabled={doc === null} onClick={() => onNavigate(1)} className="inline-flex items-center justify-center gap-2 rounded-xl bg-[#151d31] py-2.5 text-xs font-semibold text-white disabled:cursor-wait disabled:opacity-50">다음<ArrowRight size={15} /></button></div>
     </aside>
   </div>

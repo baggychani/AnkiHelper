@@ -69,6 +69,15 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
     radial-gradient(ellipse 48% 44% at 88% 90%, rgba(13, 148, 136, .1), transparent 70%);
 }
 
+.welcome-shell.welcome-pointer-tracking-off .welcome-aurora-pointer,
+.welcome-shell.welcome-pointer-tracking-off .welcome-glow-orb {
+  display: none;
+}
+
+.welcome-shell.welcome-pointer-tracking-off .welcome-content {
+  transform: none;
+}
+
 .welcome-aurora-pointer {
   background:
     radial-gradient(ellipse 31% 35% at var(--welcome-x, 50%) var(--welcome-y, 50%), rgba(129, 140, 248, .19), transparent 69%),

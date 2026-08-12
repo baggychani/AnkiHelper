@@ -105,17 +105,29 @@ def _backend_state() -> BackendState:
     return app.state.workspace
 _sound_marker = re.compile(
     r"<span class=(?P<class_quote>[\"'])sound(?P=class_quote)\s+"
+    r"(?:(?:data-anki-autoplay=(?P<autoplay_quote>[\"'])(?P<autoplay>.*?)(?P=autoplay_quote))\s+)?"
     r"data-sound=(?P<value_quote>[\"'])(?P<filename>.*?)(?P=value_quote)>.*?</span>",
     re.DOTALL,
 )
+# Anki Desktop / AnkiDroid replay control markup (reviewer.scss defaults).
 _replay_svg = (
-    "<svg viewBox='0 0 48 48' aria-hidden='true'>"
-    "<path d='M7 18h8l11-9v30l-11-9H7z'/>"
-    "<path d='M31 17c3 3 3 11 0 14M36 12c7 7 7 17 0 24' fill='none' "
-    "stroke='currentColor' stroke-width='4' stroke-linecap='round'/></svg>"
+    "<svg class='playImage' viewBox='0 0 64 64' version='1.1' aria-hidden='true'>"
+    "<circle cx='32' cy='32' r='29'/>"
+    "<path d='M56.502,32.301l-37.502,20.101l0.329,-40.804l37.173,20.703Z'/>"
+    "</svg>"
+)
+_replay_button_css = (
+    ".replay-button{text-decoration:none;display:inline-flex;vertical-align:middle;margin:3px;"
+    "cursor:pointer;border:none;background:none;padding:0;font:inherit}"
+    ".replay-button span{display:inline-flex;vertical-align:middle;padding:5px}"
+    ".replay-button svg{display:inline;width:1em;height:1em;min-width:32px;min-height:32px}"
+    ".replay-button svg circle{fill:#fff;stroke:#414141}"
+    ".replay-button svg path{fill:#414141}"
+    ".replay-button.playing svg circle{fill:#414141;stroke:#414141}"
+    ".replay-button.playing svg path{fill:#fff}"
 )
 _preview_url_attribute = re.compile(
-    r"(?P<prefix>\b(?:src|poster|href)\s*=\s*)(?:(?P<quote>[\"'])(?P<quoted>.*?)(?P=quote)|(?P<bare>[^\s>]+))",
+    r"(?P<prefix>(?<![\w.])(?:src|poster|href)\s*=\s*)(?:(?P<quote>[\"'])(?P<quoted>.*?)(?P=quote)|(?P<bare>[^\s>]+))",
     re.IGNORECASE,
 )
 _css_url = re.compile(
@@ -124,7 +136,7 @@ _css_url = re.compile(
 )
 _css_import = re.compile(r"(?P<prefix>@import\s+)(?P<quote>[\"'])(?P<url>.*?)(?P=quote)", re.IGNORECASE)
 _srcset_attribute = re.compile(
-    r"(?P<prefix>\bsrcset\s*=\s*)(?:(?P<quote>[\"'])(?P<quoted>.*?)(?P=quote)|(?P<bare>[^\s>]+))",
+    r"(?P<prefix>(?<![\w.])srcset\s*=\s*)(?:(?P<quote>[\"'])(?P<quoted>.*?)(?P=quote)|(?P<bare>[^\s>]+))",
     re.IGNORECASE,
 )
 _byte_range = re.compile(r"bytes=(?P<start>\d*)-(?P<end>\d*)$")
@@ -443,9 +455,10 @@ def _embed_preview_media(
         value = media_url(filename)
         if value is None:
             return f"<span class='sound'>🔊 {html.escape(filename)}</span>"
+        autoplay = " data-autoplay='false'" if match.group("autoplay") == "false" else ""
         return (
             "<button type='button' class='replay-button anki-audio sound' "
-            f"data-audio='{value}' aria-label='음성 재생'>{_replay_svg}</button>"
+            f"data-audio='{value}'{autoplay} aria-label='음성 재생'><span>{_replay_svg}</span></button>"
         )
 
     def runtime_resolver() -> str:
@@ -454,6 +467,9 @@ def _embed_preview_media(
             filename: f"{media_base_url.rstrip('/')}/api/media/{quote(stored_name, safe='')}"
             for filename, stored_name in media_by_name.items()
         }
+        for filename in media_by_name:
+            if filename.casefold().endswith(".css"):
+                urls[filename] = stylesheet_url(filename) or urls[filename]
         serialized = json.dumps(urls, ensure_ascii=False).replace("<", "\\u003c").replace(">", "\\u003e")
         return f"""<script>(function(){{
 const assets={serialized};
@@ -470,36 +486,51 @@ Storage.prototype.removeItem=function(key){{delete bucket(this)[String(key)];try
 const resolve=value=>{{
   if(typeof value!=="string")return value;
   const plain=value.split(/[?#]/,1)[0];
-  return assets[value]||assets[plain]||value;
+  let filename=plain;
+  try{{filename=decodeURIComponent(new URL(plain,document.baseURI).pathname.split("/").pop()||plain);}}catch(_error){{}}
+  return assets[value]||assets[plain]||assets[filename]||value;
 }};
-const patch=(prototype,property)=>{{
+const resolveSrcset=value=>typeof value==="string"?value.split(",").map(candidate=>{{const parts=candidate.trim().split(/\\s+/,2);return [resolve(parts[0]),parts[1]].filter(Boolean).join(" ");}}).join(", "):value;
+const resolveCss=value=>typeof value==="string"?value.replace(/url\\((['\\"]?)(.*?)\\1\\)/g,(_match,quote,url)=>`url(${{quote}}${{resolve(url)}}${{quote}})`):value;
+const patch=(prototype,property,map=resolve)=>{{
   const descriptor=Object.getOwnPropertyDescriptor(prototype,property);
   if(!descriptor||!descriptor.get||!descriptor.set)return;
-  Object.defineProperty(prototype,property,{{...descriptor,set(value){{descriptor.set.call(this,resolve(value));}}}});
+  Object.defineProperty(prototype,property,{{...descriptor,set(value){{descriptor.set.call(this,map(value));}}}});
 }};
 patch(HTMLImageElement.prototype,"src");
 patch(HTMLAudioElement.prototype,"src");
 patch(HTMLVideoElement.prototype,"src");
 patch(HTMLSourceElement.prototype,"src");
-patch(HTMLImageElement.prototype,"srcset");
+patch(HTMLImageElement.prototype,"srcset",resolveSrcset);
 patch(HTMLVideoElement.prototype,"poster");
 patch(HTMLLinkElement.prototype,"href");
+for(const property of ["background","backgroundImage","borderImage","content","cursor","listStyle","mask","maskImage"])
+  patch(CSSStyleDeclaration.prototype,property,resolveCss);
+const nativeSetProperty=CSSStyleDeclaration.prototype.setProperty;
+CSSStyleDeclaration.prototype.setProperty=function(name,value,priority){{
+  return nativeSetProperty.call(this,name,resolveCss(value),priority);
+}};
 const setAttribute=Element.prototype.setAttribute;
 Element.prototype.setAttribute=function(name,value){{
   const attribute=String(name).toLowerCase();
-  return setAttribute.call(this,name,["src","srcset","poster","href"].includes(attribute)?resolve(value):value);
+  const next=attribute==="srcset"?resolveSrcset(value):["src","poster","href"].includes(attribute)?resolve(value):attribute==="style"?resolveCss(value):value;
+  return setAttribute.call(this,name,next);
 }};
 const rewriteElement=element=>{{
   if(!(element instanceof Element))return;
   for(const name of ["src","srcset","poster","href"]){{
-    if(element.hasAttribute(name))element.setAttribute(name,resolve(element.getAttribute(name)));
+    if(element.hasAttribute(name)){{const current=element.getAttribute(name);const next=resolve(current);if(next!==current)element.setAttribute(name,next);}}
   }}
-  if(element.hasAttribute("style"))element.setAttribute("style",element.getAttribute("style").replace(/url\\((['\\"]?)(.*?)\\1\\)/g,(_match,quote,url)=>`url(${{quote}}${{resolve(url)}}${{quote}})`));
-  element.querySelectorAll?.("[src],[srcset],[poster],[href],[style]").forEach(rewriteElement);
+  if(element.hasAttribute("style")){{const current=element.getAttribute("style");const next=resolveCss(current);if(next!==current)element.setAttribute("style",next);}}
+  if(element instanceof HTMLStyleElement){{const next=resolveCss(element.textContent);if(next!==element.textContent)element.textContent=next;}}
+  element.querySelectorAll?.("[src],[srcset],[poster],[href],[style],style").forEach(rewriteElement);
 }};
-new MutationObserver(records=>records.forEach(record=>record.addedNodes.forEach(rewriteElement))).observe(document.documentElement,{{childList:true,subtree:true}});
+new MutationObserver(records=>records.forEach(record=>{{
+  if(record.type==="attributes")rewriteElement(record.target);
+  record.addedNodes.forEach(rewriteElement);
+}})).observe(document.documentElement,{{childList:true,subtree:true,attributes:true,attributeFilter:["src","srcset","poster","href","style"]}});
 const originalFetch=window.fetch.bind(window);
-window.fetch=(input,...rest)=>originalFetch(typeof input==="string"?resolve(input):input,...rest);
+window.fetch=(input,...rest)=>originalFetch(typeof input==="string"?resolve(input):input instanceof URL?new URL(resolve(input.href)):input,...rest);
 window.__ankiHelperResolveMediaUrl=resolve;
 }})();</script>"""
 
@@ -999,9 +1030,23 @@ def preview_card(
         raise HTTPException(status_code=404, detail="카드 템플릿을 찾지 못했습니다.")
     values = note_type.notes[note_index % len(note_type.notes)] if note_type.notes else [""] * len(note_type.fields)
     template = note_type.templates[template_index]
-    front = render_template(template.front, note_type.fields, values)
-    body = front if side == "front" else render_template(template.back, note_type.fields, values, front)
-    helper_css = ".anki-audio{cursor:pointer}.anki-audio:not(.replay-button){display:inline-grid;place-items:center;width:36px;height:36px;margin:0 0 0 10px;border:1px solid #f4b183;border-radius:999px;background:#fff7ef;color:#d44709;font:700 16px/1 system-ui,sans-serif}.anki-audio.playing:not(.replay-button){background:#d44709;color:#fff}"
+    special_values = {"Type": note_type.name, "Card": template.name}
+    front = render_template(template.front, note_type.fields, values, special_values=special_values)
+    body = front if side == "front" else render_template(
+        template.back,
+        note_type.fields,
+        values,
+        front,
+        is_answer=True,
+        special_values=special_values,
+    )
+    helper_css = (
+        f"{_replay_button_css}"
+        ".anki-audio:not(.replay-button){display:inline-grid;place-items:center;width:36px;height:36px;"
+        "margin:0 0 0 10px;border:1px solid #f4b183;border-radius:999px;background:#fff7ef;color:#d44709;"
+        "font:700 16px/1 system-ui,sans-serif;cursor:pointer}"
+        ".anki-audio.playing:not(.replay-button){background:#d44709;color:#fff}"
+    )
     markup = f"<style>{helper_css}{note_type.css}</style>{body}"
     return {
         "html": _embed_preview_media(

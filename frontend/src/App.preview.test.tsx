@@ -106,4 +106,20 @@ describe('App preview navigation', () => {
     await waitFor(() => expect(screen.getByText('미리보기 렌더링 실패')).toBeTruthy())
     expect(screen.queryByTitle('카드 미리보기')).toBeNull()
   })
+
+  it('switches the preview document between PC, AnkiDroid, and night CSS contexts', async () => {
+    const user = userEvent.setup()
+    render(<App />)
+
+    await user.click(await screen.findByRole('button', { name: '실시간 미리보기' }))
+    const iframe = await screen.findByTitle('카드 미리보기')
+    await waitFor(() => expect(iframe.getAttribute('srcdoc')).toContain('<body class="card card1 win">'))
+
+    await user.click(screen.getByRole('button', { name: 'AnkiDroid' }))
+    await waitFor(() => expect(screen.getByTitle('카드 미리보기').getAttribute('srcdoc')).toContain('card card1 mobile android linux chrome'))
+    expect(screen.getByText('ANKIDROID 미리보기')).toBeTruthy()
+
+    await user.click(screen.getByRole('button', { name: '야간 모드' }))
+    await waitFor(() => expect(screen.getByTitle('카드 미리보기').getAttribute('srcdoc')).toContain('nightMode night_mode ankidroid_dark_mode'))
+  })
 })
