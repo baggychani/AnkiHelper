@@ -50,6 +50,7 @@ from .anki_package import (
     read_apkg,
     remove_media,
     remove_note_type,
+    rename_media,
     render_template,
     reorder_field,
     save_apkg,
@@ -270,6 +271,10 @@ class SavePackageRequest(BaseModel):
 class MediaImportRequest(BaseModel):
     paths: list[str]
     template_asset: bool = False
+
+
+class MediaRenameRequest(BaseModel):
+    name: str
 
 
 class ImportProjectRequest(BaseModel):
@@ -759,6 +764,27 @@ def add_media(payload: MediaImportRequest) -> dict:
     except (OSError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"workspace": _workspace_data(state), "items": added}
+
+
+@app.patch("/api/media/{stored_name}")
+def rename_media_file(stored_name: str, payload: MediaRenameRequest) -> dict:
+    state = _backend_state()
+    package = state.package
+    if package is None:
+        raise HTTPException(status_code=404, detail="먼저 APKG 파일을 열어주세요.")
+    if stored_name not in package.media:
+        raise HTTPException(status_code=404, detail="미디어 파일을 찾지 못했습니다.")
+    old_name = package.media[stored_name]
+    try:
+        item = rename_media(package, stored_name, payload.name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "workspace": _workspace_data(state),
+        "item": item,
+        "old_name": old_name,
+        "new_name": item["name"],
+    }
 
 
 @app.delete("/api/media/{stored_name}")

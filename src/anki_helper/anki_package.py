@@ -18,7 +18,7 @@ import zipfile
 from dataclasses import asdict, dataclass, field as dataclass_field
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
-from urllib.parse import unquote
+from urllib.parse import quote, unquote
 from uuid import uuid4
 
 
@@ -1427,6 +1427,128 @@ def remove_media(package: DeckPackage, stored_name: str) -> None:
     elif stored_name in package.archive_entries:
         package.removed_media.add(stored_name)
     del package.media[stored_name]
+
+
+def _rewrite_media_ref_value(value: str, old_name: str, new_name: str) -> str:
+    """Rewrite a single media URL/filename token when it points at old_name."""
+    if media_reference_filename(value) != old_name:
+        return value
+    bare = html.unescape(value).strip()
+    path_part = bare.split("?", 1)[0].split("#", 1)[0]
+    suffix = bare[len(path_part) :]
+    if unquote(path_part) != path_part or "%" in path_part:
+        return quote(new_name, safe="") + suffix
+    return new_name + suffix
+
+
+def _rewrite_media_name_in_markup(markup: str, old_name: str, new_name: str) -> str:
+    """Replace media references to old_name inside field/template/CSS markup."""
+    if not markup or old_name == new_name:
+        return markup
+
+    def sound_replacer(match: re.Match[str]) -> str:
+        return f"[sound:{_rewrite_media_ref_value(match.group(1), old_name, new_name)}]"
+
+    text = SOUND_REFERENCE.sub(sound_replacer, markup)
+
+    def attr_replacer(match: re.Match[str]) -> str:
+        full = match.group(0)
+        quoted = match.groupdict().get("quoted")
+        bare = match.groupdict().get("bare")
+        if quoted is not None:
+            rewritten = _rewrite_media_ref_value(quoted, old_name, new_name)
+            return full if rewritten == quoted else full.replace(quoted, rewritten, 1)
+        if bare is not None:
+            rewritten = _rewrite_media_ref_value(bare, old_name, new_name)
+            return full if rewritten == bare else full.replace(bare, rewritten, 1)
+        return full
+
+    for pattern in (HTML_MEDIA_ATTRIBUTE, HTML_STYLESHEET_HREF, CSS_URL_REFERENCE, CSS_IMPORT_REFERENCE):
+        text = pattern.sub(attr_replacer, text)
+
+    def srcset_replacer(match: re.Match[str]) -> str:
+        full = match.group(0)
+        value = match.group("quoted") if match.group("quoted") is not None else match.group("bare")
+        if value is None:
+            return full
+        parts: list[str] = []
+        changed = False
+        for candidate in value.split(","):
+            piece = candidate.strip()
+            if not piece:
+                continue
+            tokens = piece.split()
+            url = tokens[0]
+            rewritten = _rewrite_media_ref_value(url, old_name, new_name)
+            changed = changed or rewritten != url
+            rest = " ".join(tokens[1:])
+            parts.append(f"{rewritten} {rest}".strip() if rest else rewritten)
+        if not changed:
+            return full
+        return full.replace(value, ", ".join(parts), 1)
+
+    text = HTML_SRCSET.sub(srcset_replacer, text)
+
+    def script_replacer(match: re.Match[str]) -> str:
+        body = match.group("body")
+
+        def string_replacer(string_match: re.Match[str]) -> str:
+            quote_char = string_match.group("quote")
+            value = string_match.group("value")
+            rewritten = _rewrite_media_ref_value(value, old_name, new_name)
+            if rewritten == value:
+                return string_match.group(0)
+            return f"{quote_char}{rewritten}{quote_char}"
+
+        new_body = SCRIPT_STRING.sub(string_replacer, body)
+        return match.group(0) if new_body == body else match.group(0).replace(body, new_body, 1)
+
+    return SCRIPT_CONTENT.sub(script_replacer, text)
+
+
+def rename_media(package: DeckPackage, stored_name: str, new_name: str) -> dict[str, Any]:
+    """Rename a media map entry and rewrite matching note/template/CSS references."""
+    if stored_name not in package.media:
+        raise ValueError("미디어 파일을 찾을 수 없습니다.")
+    old_name = package.media[stored_name]
+    cleaned = _safe_media_name(new_name.strip())
+    old_suffix = Path(old_name).suffix
+    new_suffix = Path(cleaned).suffix
+    if not new_suffix:
+        cleaned = f"{Path(cleaned).stem}{old_suffix}"
+    elif new_suffix.casefold() != old_suffix.casefold():
+        raise ValueError("확장자는 바꿀 수 없습니다. 파일 이름만 수정해 주세요.")
+    else:
+        cleaned = f"{Path(cleaned).stem}{old_suffix}"
+
+    staged_path = package.pending_media.get(stored_name)
+    if staged_path is not None:
+        if not staged_path.is_file():
+            raise ValueError("미디어 파일을 찾을 수 없습니다.")
+        size = staged_path.stat().st_size
+    else:
+        if stored_name not in package.archive_entries or stored_name in package.removed_media:
+            raise ValueError("미디어 파일을 찾을 수 없습니다.")
+        with zipfile.ZipFile(package.source) as archive:
+            size = archive.getinfo(stored_name).file_size
+
+    if cleaned == old_name:
+        return {"name": old_name, "stored_name": stored_name, "size": size, "type": _media_type(old_name)}
+
+    used = {name for other_stored, name in package.media.items() if other_stored != stored_name}
+    if cleaned.casefold() in {name.casefold() for name in used}:
+        raise ValueError("같은 이름의 미디어가 이미 있습니다.")
+
+    package.media[stored_name] = cleaned
+    for note_type in package.note_types:
+        note_type.css = _rewrite_media_name_in_markup(note_type.css, old_name, cleaned)
+        for template in note_type.templates:
+            template.front = _rewrite_media_name_in_markup(template.front, old_name, cleaned)
+            template.back = _rewrite_media_name_in_markup(template.back, old_name, cleaned)
+        for values in note_type.notes:
+            for index, value in enumerate(values):
+                values[index] = _rewrite_media_name_in_markup(value, old_name, cleaned)
+    return {"name": cleaned, "stored_name": stored_name, "size": size, "type": _media_type(cleaned)}
 
 
 def export_media(package: DeckPackage, destination: str | Path) -> Path:

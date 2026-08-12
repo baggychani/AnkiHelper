@@ -26,6 +26,7 @@ from anki_helper.anki_package import (
     media_items,
     read_apkg,
     remove_media,
+    rename_media,
     render_template,
     save_apkg,
     split_field_content,
@@ -232,6 +233,61 @@ class MediaWorkflowTests(unittest.TestCase):
             import_media(self.package, [self.asset, missing], template_asset=True)
         self.assertEqual({}, self.package.media)
         self.assertEqual({}, self.package.pending_media)
+
+    def test_rename_media_rewrites_references_and_rejects_extension_change(self) -> None:
+        special = self.root / "badge 100%.svg"
+        special.write_text('<svg xmlns="http://www.w3.org/2000/svg"/>', encoding="utf-8")
+        sound = self.root / "answer.mp3"
+        sound.write_bytes(b"audio")
+        import_media(self.package, [special], template_asset=True)
+        import_media(self.package, [sound])
+        note_type = self.package.note_types[0]
+        note_type.templates[0].front = '<img src="_badge%20100%25.svg" alt="">{{Front}}'
+        note_type.templates[0].back = '<script>const file = "_badge 100%.svg";</script>{{Back}}'
+        note_type.css = '@font-face { src: url("_badge 100%.svg"); }'
+        note_type.notes[0][1] = "[sound:answer.mp3]"
+        stored = next(key for key, name in self.package.media.items() if name == "_badge 100%.svg")
+        sound_stored = next(key for key, name in self.package.media.items() if name == "answer.mp3")
+
+        renamed = rename_media(self.package, stored, "_logo.svg")
+        self.assertEqual("_logo.svg", renamed["name"])
+        self.assertEqual("_logo.svg", self.package.media[stored])
+        self.assertIn('src="_logo.svg"', note_type.templates[0].front)
+        self.assertIn('"_logo.svg"', note_type.templates[0].back)
+        self.assertIn('url("_logo.svg")', note_type.css)
+
+        sound_renamed = rename_media(self.package, sound_stored, "reply.mp3")
+        self.assertEqual("reply.mp3", sound_renamed["name"])
+        self.assertEqual("[sound:reply.mp3]", note_type.notes[0][1])
+
+        stem_only = rename_media(self.package, sound_stored, "spoken")
+        self.assertEqual("spoken.mp3", stem_only["name"])
+        self.assertEqual("[sound:spoken.mp3]", note_type.notes[0][1])
+
+        with self.assertRaises(ValueError):
+            rename_media(self.package, sound_stored, "reply.wav")
+        other = self.root / "other.mp3"
+        other.write_bytes(b"other")
+        import_media(self.package, [other])
+        with self.assertRaises(ValueError):
+            rename_media(self.package, sound_stored, "other.mp3")
+
+    def test_rename_media_works_for_saved_apkg_entries(self) -> None:
+        sound = self.root / "answer.mp3"
+        sound.write_bytes(b"audio-bytes")
+        import_media(self.package, [sound])
+        self.package.note_types[0].notes[0][1] = "[sound:answer.mp3]"
+        saved = self.root / "saved.apkg"
+        save_apkg(self.package, saved, backup=False)
+        reopened = read_apkg(saved)
+        stored = next(key for key, name in reopened.media.items() if name == "answer.mp3")
+
+        renamed = rename_media(reopened, stored, "reply.mp3")
+        self.assertEqual("reply.mp3", renamed["name"])
+        self.assertEqual("reply.mp3", reopened.media[stored])
+        self.assertEqual("[sound:reply.mp3]", reopened.note_types[0].notes[0][1])
+        self.assertGreater(renamed["size"], 0)
+        self.assertEqual({}, reopened.pending_media)
 
     @unittest.skipIf(find_spec("openpyxl") is None, "openpyxl is required for XLSX import tests")
     def test_xlsx_table_source_reads_workbook_sheets(self) -> None:

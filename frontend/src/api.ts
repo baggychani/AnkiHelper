@@ -143,6 +143,7 @@ export const api = {
   media: () => request<MediaItem[]>('/api/media'),
   mediaHealth: () => request<MediaHealth>('/api/media/health'),
   importMedia: (paths: string[], templateAsset = false) => request<{ workspace: Workspace; items: MediaItem[] }>('/api/media/import', { method: 'POST', body: JSON.stringify({ paths, template_asset: templateAsset }) }),
+  renameMedia: (storedName: string, name: string) => request<{ workspace: Workspace; item: MediaItem; old_name: string; new_name: string }>(`/api/media/${encodeURIComponent(storedName)}`, { method: 'PATCH', body: JSON.stringify({ name }) }),
   deleteMedia: (storedName: string, force = false) => request<{ workspace: Workspace }>(`/api/media/${encodeURIComponent(storedName)}?force=${force}`, { method: 'DELETE' }),
   mediaUrl: (storedName: string) => `${base}/api/media/${encodeURIComponent(storedName)}`,
   importProject: (path: string) => request<{ workspace: Workspace; note_type_id: string }>('/api/projects/import', { method: 'POST', body: JSON.stringify({ path }) }),

@@ -215,6 +215,78 @@ class BackendApiTests(unittest.TestCase):
             remaining = client.get("/api/media").json()
             self.assertEqual(["answer.mp3"], [item["name"] for item in remaining])
 
+    def test_media_rename_updates_references(self) -> None:
+        asset = self.root / "badge.svg"
+        asset.write_text('<svg xmlns="http://www.w3.org/2000/svg"/>', encoding="utf-8")
+
+        with TestClient(backend.app) as client:
+            _workspace, note_type_id = self._open_workspace(client)
+            imported = client.post("/api/media/import", json={"paths": [str(asset)], "template_asset": True})
+            self.assertEqual(200, imported.status_code, imported.text)
+            client.patch(
+                f"/api/note-types/{note_type_id}/templates/0",
+                json={"front": '<img src="_badge.svg">{{Front}}'},
+            )
+            client.patch(
+                f"/api/note-types/{note_type_id}/notes/0/fields/1",
+                json={"value": "[sound:answer.mp3]"},
+            )
+            badge = next(item for item in client.get("/api/media").json() if item["name"] == "_badge.svg")
+            sound = next(item for item in client.get("/api/media").json() if item["name"] == "answer.mp3")
+
+            renamed = client.patch(f"/api/media/{badge['stored_name']}", json={"name": "_logo.svg"})
+            self.assertEqual(200, renamed.status_code, renamed.text)
+            self.assertEqual("_badge.svg", renamed.json()["old_name"])
+            self.assertEqual("_logo.svg", renamed.json()["new_name"])
+            template = client.get("/api/workspace").json()["note_types"][0]["templates"][0]["front"]
+            self.assertIn('src="_logo.svg"', template)
+
+            blocked = client.patch(f"/api/media/{sound['stored_name']}", json={"name": "answer.wav"})
+            self.assertEqual(400, blocked.status_code, blocked.text)
+
+    def test_move_notes_between_note_types_with_field_mapping(self) -> None:
+        with TestClient(backend.app) as client:
+            _workspace, source_id = self._open_workspace(client)
+            cloned = client.post(
+                f"/api/note-types/{source_id}/clone",
+                json={"name": "Target", "move_cards": False},
+            )
+            self.assertEqual(200, cloned.status_code, cloned.text)
+            target_id = cloned.json()["selected_note_type_id"]
+            self.assertNotEqual(source_id, target_id)
+
+            # Leave the clone empty so the move appends only the source cards.
+            package = backend.app.state.workspace.package
+            assert package is not None
+            destination = next(item for item in package.note_types if item.id == target_id)
+            destination.notes = []
+            package.note_ids[target_id] = []
+
+            moved = client.post(
+                f"/api/note-types/{source_id}/move-notes",
+                json={"destination_id": target_id, "mapping": {"0": 1, "1": 0}},
+            )
+            self.assertEqual(200, moved.status_code, moved.text)
+            payload = moved.json()
+            self.assertEqual(1, payload["moved"])
+            self.assertEqual(target_id, payload["workspace"]["selected_note_type_id"])
+
+            types = {item["id"]: item for item in payload["workspace"]["note_types"]}
+            self.assertEqual([], types[source_id]["notes"])
+            self.assertEqual([["[sound:answer.mp3]", "question"]], types[target_id]["notes"])
+
+            deleted = client.delete(f"/api/note-types/{source_id}")
+            self.assertEqual(200, deleted.status_code, deleted.text)
+            remaining = deleted.json()["note_types"]
+            self.assertEqual(1, len(remaining))
+            self.assertEqual("Target", remaining[0]["name"])
+
+            same = client.post(
+                f"/api/note-types/{target_id}/move-notes",
+                json={"destination_id": target_id, "mapping": {"0": 0}},
+            )
+            self.assertEqual(400, same.status_code, same.text)
+
     def test_preview_embeds_pending_design_assets(self) -> None:
         asset = self.root / "badge.svg"
         asset.write_text('<svg xmlns="http://www.w3.org/2000/svg"/>', encoding="utf-8")
