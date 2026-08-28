@@ -24,7 +24,7 @@ SOURCE_MARKERS = (
     ROOT / "pyproject.toml",
     FRONTEND / "package.json",
     FRONTEND / "src-tauri" / "tauri.conf.json",
-    *sorted((FRONTEND / "src").glob("*")),
+    *sorted((FRONTEND / "src").rglob("*")),
     *sorted((FRONTEND / "src-tauri" / "src").glob("*.rs")),
     *sorted((ROOT / "src" / "anki_helper").glob("*.py")),
 )

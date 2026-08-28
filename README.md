@@ -134,6 +134,7 @@ npm run tauri dev
 
 ```powershell
 .\.venv\Scripts\python.exe -m ruff check app.py scripts src tests
+$env:PYTHONPATH = 'src'
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 cd frontend
 npm run lint

@@ -149,5 +149,8 @@ export const api = {
   importProject: (path: string) => request<{ workspace: Workspace; note_type_id: string }>('/api/projects/import', { method: 'POST', body: JSON.stringify({ path }) }),
   preview: (noteTypeId: string, templateIndex: number, side: 'front' | 'back', noteIndex: number, signal?: AbortSignal) =>
     request<{ html: string }>(`/api/note-types/${noteTypeId}/preview?template_index=${templateIndex}&side=${side}&note_index=${noteIndex}`, { signal }),
-  exportUrl: (kind: 'tsv' | 'design' | 'bundle' | 'media' | 'project', noteTypeId: string) => `${base}/api/note-types/${noteTypeId}/export/${kind}`,
+  exportUrl: (kind: 'tsv' | 'design' | 'bundle' | 'media' | 'project', noteTypeId: string, mediaType?: MediaKind) => {
+    const query = kind === 'media' && mediaType ? `?media_type=${mediaType}` : ''
+    return `${base}/api/note-types/${noteTypeId}/export/${kind}${query}`
+  },
 }

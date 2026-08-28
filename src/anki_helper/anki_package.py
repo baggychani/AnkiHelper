@@ -1307,7 +1307,7 @@ def export_design(note_type: NoteType, destination: str | Path) -> Path:
 
 def _media_type(name: str) -> Literal["audio", "image", "video", "font", "other"]:
     suffix = Path(name).suffix.lower()
-    if suffix in {".mp3", ".wav", ".ogg", ".m4a", ".flac", ".opus", ".aac", ".aiff", ".aif", ".wma"}:
+    if suffix in {".mp3", ".wav", ".ogg", ".oga", ".m4a", ".flac", ".opus", ".aac", ".aiff", ".aif", ".wma"}:
         return "audio"
     if suffix in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".avif", ".bmp", ".ico", ".apng"}:
         return "image"
@@ -1376,6 +1376,35 @@ def _unique_media_name(name: str, used: set[str]) -> str:
     while f"{stem}-{counter}{suffix}".casefold() in used_casefolded:
         counter += 1
     return f"{stem}-{counter}{suffix}"
+
+
+def _exportable_media_items(
+    package: DeckPackage,
+    media_type: Literal["audio", "image", "video", "font", "other"] | None = None,
+) -> list[dict[str, Any]]:
+    """Return media items that can be represented safely in a Windows ZIP extraction.
+
+    Existing APKGs can contain arbitrary media-map names, unlike names added
+    through this app.  Do not silently rewrite those names during export: the
+    project and bundle templates would keep their old references.  Instead,
+    reject unsafe or colliding names before creating an archive so the user can
+    rename the media explicitly.
+    """
+    items = [item for item in media_items(package) if media_type is None or item["type"] == media_type]
+    seen_names: set[str] = set()
+    for item in items:
+        name = item["name"]
+        try:
+            safe_name = _safe_media_name(name)
+        except ValueError as exc:
+            raise ValueError(f"내보낼 수 없는 미디어 파일 이름입니다: {name}") from exc
+        if name != safe_name:
+            raise ValueError(f"내보낼 수 없는 미디어 파일 이름입니다: {name}")
+        key = safe_name.casefold()
+        if key in seen_names:
+            raise ValueError(f"겹치는 미디어 파일 이름이 있어 내보낼 수 없습니다: {name}")
+        seen_names.add(key)
+    return items
 
 
 def _next_media_stored_name(package: DeckPackage) -> str:
@@ -1551,10 +1580,15 @@ def rename_media(package: DeckPackage, stored_name: str, new_name: str) -> dict[
     return {"name": cleaned, "stored_name": stored_name, "size": size, "type": _media_type(cleaned)}
 
 
-def export_media(package: DeckPackage, destination: str | Path) -> Path:
+def export_media(
+    package: DeckPackage,
+    destination: str | Path,
+    media_type: Literal["audio", "image", "video", "font", "other"] | None = None,
+) -> Path:
     target = Path(destination)
+    items = _exportable_media_items(package, media_type)
     with zipfile.ZipFile(package.source) as source, zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as output:
-        for item in media_items(package):
+        for item in items:
             output.writestr(f"media/{item['name']}", _media_bytes(package, item["stored_name"], source))
     return target
 
@@ -1664,6 +1698,7 @@ def media_references_for(package: DeckPackage, name: str) -> list[dict[str, str]
 def export_project(package: DeckPackage, note_type: NoteType, destination: str | Path) -> Path:
     """Create an editable, documented round-trip project archive."""
     target = Path(destination)
+    media = _exportable_media_items(package)
     safe_model = re.sub(r'[\\/:*?"<>|]', "_", note_type.name)
     manifest = {
         "format": "anki-helper/project-v1",
@@ -1694,7 +1729,7 @@ def export_project(package: DeckPackage, note_type: NoteType, destination: str |
             output.writestr(f"models/{safe_model}/card_{index}_front.html", template.front)
             output.writestr(f"models/{safe_model}/card_{index}_back.html", template.back)
         with zipfile.ZipFile(package.source) as source:
-            for item in media_items(package):
+            for item in media:
                 output.writestr(f"media/{item['name']}", _media_bytes(package, item["stored_name"], source))
     return target
 
@@ -1731,6 +1766,7 @@ def import_project(package: DeckPackage, source: str | Path) -> NoteType:
 
 def export_bundle(package: DeckPackage, note_type: NoteType, destination: str | Path) -> Path:
     target = Path(destination)
+    media = _exportable_media_items(package)
     with tempfile.TemporaryDirectory() as temporary:
         folder = Path(temporary)
         export_tsv(note_type, folder / "input.tsv")
@@ -1738,6 +1774,6 @@ def export_bundle(package: DeckPackage, note_type: NoteType, destination: str | 
         with zipfile.ZipFile(package.source) as source_archive, zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as output:
             output.write(folder / "input.tsv", "input.tsv")
             output.write(folder / "design.json", "design.json")
-            for item in media_items(package):
+            for item in media:
                 output.writestr(f"media/{item['name']}", _media_bytes(package, item["stored_name"], source_archive))
     return target

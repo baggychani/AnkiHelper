@@ -22,6 +22,10 @@ describe('preview audio script', () => {
     expect(doc).toContain('<body class="card card2 win"><div class="content">front</div>')
     expect(doc).not.toContain('id="anki-card"')
     expect(doc).toContain('void startAutoplay()')
+    expect(doc).toContain("default-src 'none'")
+    expect(doc).toContain("form-action 'none'")
+    expect(doc).toContain("navigate-to 'none'")
+    expect(doc).toContain('connect-src http://127.0.0.1:8765')
   })
 
   it('exposes AnkiDroid and night-mode CSS classes', () => {

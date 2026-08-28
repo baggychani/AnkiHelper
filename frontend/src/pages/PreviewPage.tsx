@@ -24,7 +24,7 @@ export function PreviewPage({ noteType, templateIndex, previewState, previewKey,
     <section className="grid min-h-0 place-items-center rounded-[20px] bg-[#172033] p-3 lg:rounded-[26px] lg:p-5">
       <div className={`flex h-[min(72vh,710px)] max-h-full w-full flex-col overflow-hidden border-[#0a0f1d] bg-white shadow-2xl transition-[max-width,border-radius,border-width] duration-300 ${platform === 'ankidroid' ? 'max-w-[430px] rounded-[30px] border-[8px]' : 'max-w-[820px] rounded-[24px] border-[6px] lg:rounded-[28px] lg:border-[7px]'}`}>
         <div className="flex h-11 shrink-0 items-center justify-between border-b px-5 text-[11px] text-slate-400"><span className="h-2 w-2 rounded-full bg-emerald-400" /><b>{deviceLabel} 미리보기</b><span>{noteIndex + 1} / {total}</span></div>
-        {doc === null ? <div role="status" className="grid h-full place-items-center text-xs font-medium text-slate-400">카드를 불러오는 중…</div> : <iframe key={`${previewKey}:${platform}:${nightMode ? 'night' : 'day'}`} title="카드 미리보기" sandbox="allow-scripts allow-same-origin" srcDoc={doc} className="h-full w-full border-0" />}
+        {doc === null ? <div role="status" className="grid h-full place-items-center text-xs font-medium text-slate-400">카드를 불러오는 중…</div> : <iframe key={`${previewKey}:${platform}:${nightMode ? 'night' : 'day'}`} title="카드 미리보기" sandbox="allow-scripts" referrerPolicy="no-referrer" srcDoc={doc} className="h-full w-full border-0" />}
       </div>
     </section>
     <aside className="flex min-h-[170px] flex-col rounded-[18px] border border-slate-200/70 bg-white p-4 shadow-card lg:rounded-[22px] lg:p-5">

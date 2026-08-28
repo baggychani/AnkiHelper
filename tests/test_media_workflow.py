@@ -69,6 +69,64 @@ class MediaWorkflowTests(unittest.TestCase):
         reopened = read_apkg(self.package.source)
         self.assertEqual(["_badge.svg"], [item["name"] for item in media_items(reopened)])
 
+    def test_export_media_can_filter_by_type(self) -> None:
+        import_media(self.package, [self.asset], template_asset=True)
+        sound = self.root / "answer.mp3"
+        sound.write_bytes(b"complete audio payload")
+        import_media(self.package, [sound])
+
+        audio_archive = self.root / "audio.zip"
+        export_media(self.package, audio_archive, "audio")
+        with zipfile.ZipFile(audio_archive) as archive:
+            self.assertEqual(["media/answer.mp3"], archive.namelist())
+
+        image_archive = self.root / "image.zip"
+        export_media(self.package, image_archive, "image")
+        with zipfile.ZipFile(image_archive) as archive:
+            self.assertEqual(["media/_badge.svg"], archive.namelist())
+
+        all_archive = self.root / "all.zip"
+        export_media(self.package, all_archive)
+        with zipfile.ZipFile(all_archive) as archive:
+            self.assertEqual(["media/_badge.svg", "media/answer.mp3"], sorted(archive.namelist()))
+
+    def test_oga_media_is_classified_and_exported_as_audio(self) -> None:
+        sound = self.root / "answer.oga"
+        sound.write_bytes(b"OggS\x00audio")
+        added = import_media(self.package, [sound])
+
+        self.assertEqual("audio", added[0]["type"])
+        archive_path = self.root / "audio.zip"
+        export_media(self.package, archive_path, "audio")
+        with zipfile.ZipFile(archive_path) as archive:
+            self.assertEqual(["media/answer.oga"], archive.namelist())
+
+    def test_exports_reject_unsafe_media_names_before_creating_archives(self) -> None:
+        added = import_media(self.package, [self.asset])
+        self.package.media[added[0]["stored_name"]] = "../escaped.svg"
+
+        exports = (
+            (self.root / "media.zip", lambda path: export_media(self.package, path)),
+            (self.root / "project.zip", lambda path: export_project(self.package, self.package.note_types[0], path)),
+            (self.root / "bundle.zip", lambda path: export_bundle(self.package, self.package.note_types[0], path)),
+        )
+        for target, export in exports:
+            with self.subTest(target=target.name), self.assertRaisesRegex(ValueError, "내보낼 수 없는 미디어"):
+                export(target)
+            self.assertFalse(target.exists())
+
+    def test_media_export_rejects_casefold_collisions(self) -> None:
+        second = self.root / "icon.svg"
+        second.write_text('<svg xmlns="http://www.w3.org/2000/svg"/>', encoding="utf-8")
+        first_item, second_item = import_media(self.package, [self.asset, second])
+        self.package.media[first_item["stored_name"]] = "Badge.svg"
+        self.package.media[second_item["stored_name"]] = "badge.svg"
+
+        archive_path = self.root / "media.zip"
+        with self.assertRaisesRegex(ValueError, "겹치는 미디어 파일 이름"):
+            export_media(self.package, archive_path)
+        self.assertFalse(archive_path.exists())
+
     @unittest.skipIf(find_spec("zstandard") is None, "zstandard is required for modern Anki media")
     def test_modern_anki_compressed_media_payload_is_decoded(self) -> None:
         import zstandard

@@ -14,10 +14,11 @@ import html
 import json
 import mimetypes
 import re
+import secrets
 import sqlite3
 import zipfile
 from copy import deepcopy
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field as dataclass_field
 from pathlib import Path
 from typing import Literal
 from urllib.parse import quote
@@ -68,6 +69,7 @@ class BackendState:
     package: DeckPackage | None = None
     selected_note_type_id: str | None = None
     requires_save_as: bool = False
+    preview_token: str = dataclass_field(default_factory=lambda: secrets.token_urlsafe(32))
 
 
 @asynccontextmanager
@@ -104,6 +106,11 @@ app.add_middleware(
 
 def _backend_state() -> BackendState:
     return app.state.workspace
+
+
+def _rotate_preview_token(state: BackendState) -> None:
+    """Invalidate preview-only media URLs when the active package changes."""
+    state.preview_token = secrets.token_urlsafe(32)
 _sound_marker = re.compile(
     r"<span class=(?P<class_quote>[\"'])sound(?P=class_quote)\s+"
     r"(?:(?:data-anki-autoplay=(?P<autoplay_quote>[\"'])(?P<autoplay>.*?)(?P=autoplay_quote))\s+)?"
@@ -372,7 +379,8 @@ def _embed_preview_media(
     images, videos, or fonts into every preview response. The runtime resolver
     also handles template JavaScript such as ``image.src = "_logo.svg"``.
     """
-    package = package or _backend_state().package
+    state = _backend_state()
+    package = package or state.package
     if package is None:
         return markup
 
@@ -390,7 +398,7 @@ def _embed_preview_media(
         stored_name = media_by_name.get(filename or "")
         if stored_name is None:
             return None
-        return f"{media_base_url.rstrip('/')}/api/media/{quote(stored_name, safe='')}"
+        return f"{media_base_url.rstrip('/')}/api/preview-media/{state.preview_token}/{quote(stored_name, safe='')}"
 
     def stylesheet_url(value: str) -> str | None:
         """Inline local CSS after rewriting its own local asset references."""
@@ -469,7 +477,7 @@ def _embed_preview_media(
     def runtime_resolver() -> str:
         """Map dynamic DOM media assignments before template scripts execute."""
         urls = {
-            filename: f"{media_base_url.rstrip('/')}/api/media/{quote(stored_name, safe='')}"
+            filename: f"{media_base_url.rstrip('/')}/api/preview-media/{state.preview_token}/{quote(stored_name, safe='')}"
             for filename, stored_name in media_by_name.items()
         }
         for filename in media_by_name:
@@ -478,16 +486,19 @@ def _embed_preview_media(
         serialized = json.dumps(urls, ensure_ascii=False).replace("<", "\\u003c").replace(">", "\\u003e")
         return f"""<script>(function(){{
 const assets={serialized};
-const host=window.parent;
-const states=host.__ankiHelperPreviewState||(host.__ankiHelperPreviewState=Object.create(null));
-const cardState=states.storage||(states.storage={{session:Object.create(null),local:Object.create(null)}});
-const nativeGet=Storage.prototype.getItem;
-const nativeSet=Storage.prototype.setItem;
-const nativeRemove=Storage.prototype.removeItem;
-const bucket=storage=>storage===window.sessionStorage?cardState.session:cardState.local;
-Storage.prototype.getItem=function(key){{const value=bucket(this)[String(key)];return value===undefined?nativeGet.call(this,key):value;}};
-Storage.prototype.setItem=function(key,value){{bucket(this)[String(key)]=String(value);try{{nativeSet.call(this,key,value)}}catch(_error){{}}}};
-Storage.prototype.removeItem=function(key){{delete bucket(this)[String(key)];try{{nativeRemove.call(this,key)}}catch(_error){{}}}};
+const cardState={{session:Object.create(null),local:Object.create(null)}};
+const storageFor=bucket=>({{
+  get length(){{return Object.keys(bucket).length;}},
+  key:index=>Object.keys(bucket)[index]??null,
+  getItem:key=>{{const value=bucket[String(key)];return value===undefined?null:value;}},
+  setItem:(key,value)=>{{bucket[String(key)]=String(value);}},
+  removeItem:key=>{{delete bucket[String(key)];}},
+  clear:()=>{{for(const key of Object.keys(bucket))delete bucket[key];}},
+}});
+try{{
+  Object.defineProperty(window,"sessionStorage",{{configurable:true,value:storageFor(cardState.session)}});
+  Object.defineProperty(window,"localStorage",{{configurable:true,value:storageFor(cardState.local)}});
+}}catch(_error){{}}
 const resolve=value=>{{
   if(typeof value!=="string")return value;
   const plain=value.split(/[?#]/,1)[0];
@@ -598,6 +609,7 @@ def open_package(payload: OpenPackageRequest) -> dict:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     state.package = package
     state.requires_save_as = requires_save_as
+    _rotate_preview_token(state)
     _cleanup_ephemeral_package(previous_package, previous_requires_save_as)
     state.selected_note_type_id = package.note_types[0].id if package.note_types else None
     return _workspace_data(state) or {}
@@ -701,6 +713,7 @@ def create_from_table(payload: TableCreateRequest) -> dict:
             template_temporary.unlink(missing_ok=True)
     state.package = package
     state.requires_save_as = True
+    _rotate_preview_token(state)
     _cleanup_ephemeral_package(previous_package, previous_requires_save_as)
     state.selected_note_type_id = package.note_types[0].id
     return _workspace_data(state) or {}
@@ -823,6 +836,29 @@ def download_media(stored_name: str, request: Request) -> Response:
         with zipfile.ZipFile(package.source) as archive:
             data = decode_media_payload(archive.read(stored_name))
     return _media_response(data, filename=item["name"], range_header=request.headers.get("range"))
+
+
+@app.get("/api/preview-media/{token}/{stored_name}")
+def download_preview_media(token: str, stored_name: str, request: Request) -> Response:
+    """Serve a capability-scoped media byte stream to an opaque preview iframe."""
+    state = _backend_state()
+    package = state.package
+    if package is None or not secrets.compare_digest(token, state.preview_token):
+        raise HTTPException(status_code=404, detail="미리보기 미디어를 찾지 못했습니다.")
+    item = next((entry for entry in media_items(package) if entry["stored_name"] == stored_name), None)
+    if item is None:
+        raise HTTPException(status_code=404, detail="미리보기 미디어를 찾지 못했습니다.")
+    staged_path = package.pending_media.get(stored_name)
+    if staged_path and staged_path.is_file():
+        data = staged_path.read_bytes()
+    else:
+        with zipfile.ZipFile(package.source) as archive:
+            data = decode_media_payload(archive.read(stored_name))
+    response = _media_response(data, filename=item["name"], range_header=request.headers.get("range"))
+    if request.headers.get("origin") == "null":
+        response.headers["Access-Control-Allow-Origin"] = "null"
+        response.headers["Vary"] = "Origin"
+    return response
 
 
 @app.post("/api/projects/import")
@@ -1083,36 +1119,54 @@ def preview_card(
     }
 
 
+_MEDIA_TYPE_LABELS = {
+    "audio": "음성",
+    "image": "이미지",
+    "video": "영상",
+    "font": "폰트",
+    "other": "기타",
+}
+
+
 @app.get("/api/note-types/{note_type_id}/export/{kind}")
-def download_export(note_type_id: str, kind: Literal["tsv", "design", "bundle", "media", "project"]) -> FileResponse:
+def download_export(
+    note_type_id: str,
+    kind: Literal["tsv", "design", "bundle", "media", "project"],
+    media_type: Literal["audio", "image", "video", "font", "other"] | None = None,
+) -> FileResponse:
     package = _backend_state().package
     note_type = _get_note_type(note_type_id)
+    media_label = f"_{_MEDIA_TYPE_LABELS[media_type]}" if kind == "media" and media_type else ""
     suffix, filename = {
         "tsv": (".tsv", f"{note_type.name}_input.tsv"),
         "design": (".json", f"{note_type.name}_design.json"),
         "bundle": (".apkg", f"{note_type.name}_수정본.apkg"),
-        "media": (".zip", f"{note_type.name}_미디어.zip"),
+        "media": (".zip", f"{note_type.name}_미디어{media_label}.zip"),
         "project": (".zip", f"{note_type.name}_편집프로젝트.zip"),
     }[kind]
     temporary = tempfile.NamedTemporaryFile(prefix="anki-helper-", suffix=suffix, delete=False)
     temporary.close()
     target = Path(temporary.name)
-    if kind == "tsv":
-        export_tsv(note_type, target)
-    elif kind == "design":
-        export_design(note_type, target)
-    elif kind == "media":
-        if package is None:
-            raise HTTPException(status_code=404, detail="패키지를 찾지 못했습니다.")
-        export_media(package, target)
-    elif kind == "project":
-        if package is None:
-            raise HTTPException(status_code=404, detail="패키지를 찾지 못했습니다.")
-        export_project(package, note_type, target)
-    else:
-        if package is None:  # Protected by _get_note_type; keep type check explicit.
-            raise HTTPException(status_code=404, detail="패키지를 찾지 못했습니다.")
-        save_apkg(deepcopy(package), target, backup=False)
+    try:
+        if kind == "tsv":
+            export_tsv(note_type, target)
+        elif kind == "design":
+            export_design(note_type, target)
+        elif kind == "media":
+            if package is None:
+                raise HTTPException(status_code=404, detail="패키지를 찾지 못했습니다.")
+            export_media(package, target, media_type)
+        elif kind == "project":
+            if package is None:
+                raise HTTPException(status_code=404, detail="패키지를 찾지 못했습니다.")
+            export_project(package, note_type, target)
+        else:
+            if package is None:  # Protected by _get_note_type; keep type check explicit.
+                raise HTTPException(status_code=404, detail="패키지를 찾지 못했습니다.")
+            save_apkg(deepcopy(package), target, backup=False)
+    except ValueError as exc:
+        target.unlink(missing_ok=True)
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return _temporary_file_response(target, filename=filename, media_type="application/octet-stream")
 
 

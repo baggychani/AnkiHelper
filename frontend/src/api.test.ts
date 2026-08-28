@@ -57,4 +57,13 @@ describe('API client', () => {
 
     await expect(api.status()).rejects.toThrow('요청을 처리하지 못했습니다.')
   })
+
+  it('appends a media type query when exporting a filtered media zip', () => {
+    expect(api.exportUrl('media', 'nt-1', 'audio')).toBe(
+      'http://127.0.0.1:8765/api/note-types/nt-1/export/media?media_type=audio',
+    )
+    expect(api.exportUrl('media', 'nt-1')).toBe(
+      'http://127.0.0.1:8765/api/note-types/nt-1/export/media',
+    )
+  })
 })

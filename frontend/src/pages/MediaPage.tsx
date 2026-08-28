@@ -2,9 +2,17 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { open, save } from '@tauri-apps/plugin-dialog'
 import { writeFile } from '@tauri-apps/plugin-fs'
 import {
-  Copy, Download, Image, Music2, Palette, Pencil, Play, Plus, ScanSearch, Trash2, Type,
+  Copy, Download, File, Image, Music2, Palette, Pencil, Play, Plus, ScanSearch, Trash2, Type,
 } from 'lucide-react'
 import { api, type MediaHealth, type MediaItem } from '../api'
+
+const mediaTypeLabels: Record<MediaItem['type'], string> = {
+  audio: '음성',
+  image: '이미지',
+  video: '영상',
+  font: '폰트',
+  other: '기타',
+}
 
 function formatSize(bytes: number) {
   if (bytes < 1024) return `${bytes} B`
@@ -12,7 +20,7 @@ function formatSize(bytes: number) {
   return `${(bytes / 1048576).toFixed(1)} MB`
 }
 
-export function MediaPage({ onExport }: { onExport: () => void }) {
+export function MediaPage({ onExport }: { onExport: (mediaType?: MediaItem['type']) => void }) {
   const [items, setItems] = useState<MediaItem[]>([])
   const [query, setQuery] = useState('')
   const [filter, setFilter] = useState<'all' | MediaItem['type']>('all')
@@ -222,6 +230,7 @@ export function MediaPage({ onExport }: { onExport: () => void }) {
     && item.name.toLowerCase().includes(query.toLowerCase()),
   )
   const count = (type: MediaItem['type']) => items.filter((item) => item.type === type).length
+  const exportLabel = filter === 'all' ? '전체 추출' : `${mediaTypeLabels[filter]} 추출`
   const chooseFilter = (next: 'all' | MediaItem['type']) => {
     if (next !== 'all' && items.find((item) => item.stored_name === playing)?.type !== next) {
       playbackRequestRef.current += 1
@@ -242,13 +251,14 @@ export function MediaPage({ onExport }: { onExport: () => void }) {
       <button type="button" aria-pressed={filter === 'image'} onClick={() => chooseFilter('image')} className={`inline-flex items-center gap-1.5 transition hover:text-cyan-700 ${filter === 'image' ? 'font-semibold text-cyan-700' : 'text-slate-500'}`}><Image size={14} className="text-cyan-500" />이미지 {count('image').toLocaleString()}</button>
       <button type="button" aria-pressed={filter === 'video'} onClick={() => chooseFilter('video')} className={`inline-flex items-center gap-1.5 transition hover:text-rose-700 ${filter === 'video' ? 'font-semibold text-rose-700' : 'text-slate-500'}`}><Play size={14} className="text-rose-500" />영상 {count('video').toLocaleString()}</button>
       <button type="button" aria-pressed={filter === 'font'} onClick={() => chooseFilter('font')} className={`inline-flex items-center gap-1.5 transition hover:text-amber-700 ${filter === 'font' ? 'font-semibold text-amber-700' : 'text-slate-500'}`}><Type size={14} className="text-amber-600" />폰트 {count('font').toLocaleString()}</button>
+      <button type="button" aria-pressed={filter === 'other'} onClick={() => chooseFilter('other')} className={`inline-flex items-center gap-1.5 transition hover:text-slate-800 ${filter === 'other' ? 'font-semibold text-slate-800' : 'text-slate-500'}`}><File size={14} className="text-slate-500" />기타 {count('other').toLocaleString()}</button>
     </div>
     <section className="flex min-h-0 flex-1 flex-col rounded-[18px] border border-slate-200/70 bg-white p-4 shadow-card lg:rounded-[22px] lg:p-5">
       <div className="mb-4 flex shrink-0 flex-wrap items-center justify-between gap-3">
         <div><h3 className="text-lg font-semibold">미디어 관리</h3><p className="mt-1 text-xs text-slate-400">디자인용 추가는 파일명 앞에 <code>_</code>를 붙입니다. 이미지는 HTML, 폰트는 CSS 복사 버튼으로 참조를 넣을 수 있습니다.</p></div>
         <div className="flex flex-wrap gap-2"><button onClick={() => void addFiles(false)} className="inline-flex h-10 items-center gap-2 rounded-xl border border-slate-200 px-3 text-xs font-semibold text-slate-700 hover:bg-slate-50"><Plus size={15} />파일 추가</button><button onClick={() => void addFiles(true)} className="inline-flex h-10 items-center gap-2 rounded-xl border border-slate-200 px-3 text-xs font-semibold text-slate-700 hover:bg-slate-50"><Palette size={15} />디자인용 추가</button></div>
       </div>
-      <div className="mb-3 flex shrink-0 gap-2"><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="파일명 검색" className="min-w-0 flex-1 rounded-xl border border-slate-200 px-3 py-2.5 text-sm outline-none" /><button onClick={() => void inspect()} className="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3 text-xs font-semibold text-slate-700 hover:bg-slate-50"><ScanSearch size={15} />미디어 검사</button><button onClick={onExport} className="inline-flex items-center gap-2 rounded-xl bg-[#151d31] px-4 text-sm font-semibold text-white"><Download size={15} />전체 추출</button></div>
+      <div className="mb-3 flex shrink-0 gap-2"><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="파일명 검색" className="min-w-0 flex-1 rounded-xl border border-slate-200 px-3 py-2.5 text-sm outline-none" /><button onClick={() => void inspect()} className="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3 text-xs font-semibold text-slate-700 hover:bg-slate-50"><ScanSearch size={15} />미디어 검사</button><button onClick={() => onExport(filter === 'all' ? undefined : filter)} className="inline-flex items-center gap-2 rounded-xl bg-[#151d31] px-4 text-sm font-semibold text-white"><Download size={15} />{exportLabel}</button></div>
       {error && <p className="mb-3 rounded-xl bg-rose-50 px-3 py-2 text-xs font-medium text-rose-700">{error}</p>}
       {health && <div className="mb-3 shrink-0 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900"><div className="flex items-center justify-between gap-3"><b>미디어 검사 결과</b><button onClick={() => setHealth(null)} className="font-semibold text-amber-700">닫기</button></div><div className="mt-2 space-y-1 leading-5">{health.missing.length > 0 && <p>누락된 참조 {health.missing.length}개: {health.missing.slice(0, 3).map((item) => `${item.filename} (${item.location})`).join(', ')}</p>}{health.mapped_missing.length > 0 && <p>APKG 미디어 맵에만 남은 파일 {health.mapped_missing.length}개</p>}{health.unused.length > 0 && <p>노트·디자인에서 쓰이지 않는 일반 파일 {health.unused.length}개</p>}{health.static_unreferenced.length > 0 && <p>참조되지 않는 디자인용 _ 파일 {health.static_unreferenced.length}개</p>}{health.case_collisions.length > 0 && <p>대소문자 충돌 {health.case_collisions.length}개</p>}{health.unindexed_entries.length > 0 && <p>미디어 맵에 없는 APKG 항목 {health.unindexed_entries.length}개</p>}{health.missing.length + health.mapped_missing.length + health.unused.length + health.static_unreferenced.length + health.case_collisions.length + health.unindexed_entries.length === 0 && <p>누락·중복·미사용 참조를 찾지 못했습니다.</p>}</div></div>}
       <div className="min-h-0 flex-1 overflow-y-auto rounded-xl border border-slate-200">{visible.length === 0 ? <div className="grid h-full min-h-40 place-items-center px-4 text-center text-sm text-slate-400">추가한 이미지, 음성, 영상, 폰트 파일이 여기에 표시됩니다.</div> : visible.map((item) => <div id={`media-${item.stored_name}`} key={item.stored_name} className={`flex flex-wrap items-center gap-3 border-b border-slate-100 px-4 py-3 last:border-0 transition-[background-color,box-shadow] duration-500 ${highlighted === item.stored_name ? 'bg-violet-100/90 shadow-[inset_0_0_0_2px_rgba(139,92,246,0.45)]' : ''}`}>{icon(item)}{editing === item.stored_name ? <input autoFocus value={renameDraft} disabled={renaming} onChange={(event) => setRenameDraft(event.target.value)} onBlur={() => { if (renameSkipBlur.current) { renameSkipBlur.current = false; return } void commitRename(item) }} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); event.currentTarget.blur() } else if (event.key === 'Escape') { event.preventDefault(); renameSkipBlur.current = true; setEditing(''); setRenameDraft(item.name) } }} className="min-w-0 flex-1 rounded-lg border border-indigo-300 bg-white px-2.5 py-1.5 text-sm font-medium text-slate-700 outline-none ring-2 ring-indigo-100" /> : <span className="min-w-0 flex-1 truncate text-sm font-medium" title={item.name}>{item.name}<small className="ml-2 text-xs font-normal text-slate-400">{formatSize(item.size)}</small></span>}{item.type === 'audio' && <button onClick={() => play(item)} className={`inline-flex h-9 items-center gap-2 rounded-lg px-3 text-xs font-semibold ${playing === item.stored_name ? 'bg-violet-600 text-white' : 'bg-violet-50 text-violet-700'}`}>{playing === item.stored_name ? '■ 정지' : '▶ 듣기'}</button>}{item.type === 'video' && <button onClick={() => setVideo(item)} className="inline-flex h-9 items-center gap-2 rounded-lg bg-rose-50 px-3 text-xs font-semibold text-rose-700"><Play size={14} />미리보기</button>}<button title={copyLabel(item)} onClick={() => void copyReference(item)} className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-50 hover:text-slate-700"><Copy size={15} /></button><button title="파일명 수정" onClick={() => beginRename(item)} className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-50 hover:text-slate-700"><Pencil size={15} /></button><button title="저장" onClick={() => void downloadOne(item)} className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-50 hover:text-slate-700"><Download size={15} /></button><button onClick={() => void remove(item)} className="inline-flex h-9 items-center gap-2 rounded-lg px-3 text-xs font-semibold text-rose-600 hover:bg-rose-50"><Trash2 size={14} />삭제</button></div>)}</div>

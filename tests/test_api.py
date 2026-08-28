@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import importlib
+import io
+import re
 import tempfile
 import unittest
+import zipfile
 from importlib.util import find_spec
 from pathlib import Path
 from unittest.mock import patch
+from urllib.parse import unquote
 
 from anki_helper.anki_package import create_package_from_table, export_project, import_media, save_apkg
 
@@ -78,7 +82,16 @@ class BackendApiTests(unittest.TestCase):
             self.assertEqual(200, preview.status_code, preview.text)
             preview_html = preview.json()["html"]
             self.assertEqual(1, preview_html.count("class='replay-button anki-audio sound'"))
-            self.assertIn("/api/media/0", preview_html)
+            match = re.search(r"/api/preview-media/([^/]+)/0", preview_html)
+            self.assertIsNotNone(match, preview_html)
+            token = match.group(1)  # type: ignore[union-attr]
+            preview_media = client.get(f"/api/preview-media/{token}/0", headers={"Origin": "null"})
+            self.assertEqual(200, preview_media.status_code, preview_media.text)
+            self.assertEqual("null", preview_media.headers.get("access-control-allow-origin"))
+            self.assertEqual(self.audio_bytes, preview_media.content)
+            self.assertEqual(404, client.get("/api/preview-media/not-the-token/0").status_code)
+            regular_media = client.get("/api/media/0", headers={"Origin": "null"})
+            self.assertIsNone(regular_media.headers.get("access-control-allow-origin"))
 
             items = client.get("/api/media")
             self.assertEqual(200, items.status_code, items.text)
@@ -215,6 +228,41 @@ class BackendApiTests(unittest.TestCase):
             remaining = client.get("/api/media").json()
             self.assertEqual(["answer.mp3"], [item["name"] for item in remaining])
 
+    def test_media_export_respects_type_filter(self) -> None:
+        asset = self.root / "badge.svg"
+        asset.write_text('<svg xmlns="http://www.w3.org/2000/svg"/>', encoding="utf-8")
+
+        with TestClient(backend.app) as client:
+            _workspace, note_type_id = self._open_workspace(client)
+            imported = client.post("/api/media/import", json={"paths": [str(asset)], "template_asset": True})
+            self.assertEqual(200, imported.status_code, imported.text)
+
+            filtered = client.get(f"/api/note-types/{note_type_id}/export/media", params={"media_type": "audio"})
+            self.assertEqual(200, filtered.status_code, filtered.text)
+            self.assertIn("_미디어_음성.zip", unquote(filtered.headers.get("content-disposition", "")))
+            with zipfile.ZipFile(io.BytesIO(filtered.content)) as archive:
+                self.assertEqual(["media/answer.mp3"], archive.namelist())
+
+            complete = client.get(f"/api/note-types/{note_type_id}/export/media")
+            self.assertEqual(200, complete.status_code, complete.text)
+            disposition = unquote(complete.headers.get("content-disposition", ""))
+            self.assertIn("_미디어.zip", disposition)
+            self.assertNotIn("_미디어_음성.zip", disposition)
+            with zipfile.ZipFile(io.BytesIO(complete.content)) as archive:
+                self.assertEqual(["media/_badge.svg", "media/answer.mp3"], sorted(archive.namelist()))
+
+    def test_media_export_rejects_unsafe_media_name_with_client_error(self) -> None:
+        with TestClient(backend.app) as client:
+            _workspace, note_type_id = self._open_workspace(client)
+            item = client.get("/api/media").json()[0]
+            package = backend.app.state.workspace.package
+            assert package is not None
+            package.media[item["stored_name"]] = "../escaped.mp3"
+
+            response = client.get(f"/api/note-types/{note_type_id}/export/media")
+            self.assertEqual(400, response.status_code, response.text)
+            self.assertIn("내보낼 수 없는 미디어", response.json()["detail"])
+
     def test_media_rename_updates_references(self) -> None:
         asset = self.root / "badge.svg"
         asset.write_text('<svg xmlns="http://www.w3.org/2000/svg"/>', encoding="utf-8")
@@ -304,11 +352,11 @@ class BackendApiTests(unittest.TestCase):
             )
             preview = client.get(f"/api/note-types/{note_type_id}/preview").json()["html"]
             badge_item = next(item for item in client.get("/api/media").json() if item["name"] == "_badge.svg")
-            badge_url = f"/api/media/{badge_item['stored_name']}"
+            badge_url = re.compile(rf"/api/preview-media/[^/]+/{re.escape(badge_item['stored_name'])}")
 
             self.assertNotIn('src="_badge.svg"', preview)
             self.assertNotIn('url("_badge.svg")', preview)
-            self.assertEqual(3, preview.count(badge_url))
+            self.assertEqual(3, len(badge_url.findall(preview)))
 
     def test_preview_uses_anki_compatible_replay_button(self) -> None:
         with TestClient(backend.app) as client:
@@ -353,7 +401,7 @@ class BackendApiTests(unittest.TestCase):
                 f"/api/note-types/{note_type_id}/preview",
                 params={"side": "back"},
             ).json()["html"]
-            self.assertIn("/api/media/", preview)
+            self.assertIn("/api/preview-media/", preview)
             self.assertEqual(1, preview.count("class='replay-button anki-audio sound'"))
 
     def test_preview_resolves_dynamic_template_media_assignments(self) -> None:
@@ -396,13 +444,13 @@ class BackendApiTests(unittest.TestCase):
             self.assertIn("element instanceof HTMLStyleElement", preview)
             self.assertLess(preview.index('patch(HTMLImageElement.prototype,"src")'), preview.index("image.src = filename"))
 
-    def test_preview_preserves_storage_between_iframe_documents(self) -> None:
+    def test_preview_uses_opaque_iframe_storage_without_parent_access(self) -> None:
         with TestClient(backend.app) as client:
             _workspace, note_type_id = self._open_workspace(client)
             preview = client.get(f"/api/note-types/{note_type_id}/preview").json()["html"]
-            self.assertIn("host.__ankiHelperPreviewState", preview)
-            self.assertIn("states.storage", preview)
-            self.assertIn("Storage.prototype.getItem=function", preview)
+            self.assertNotIn("window.parent", preview)
+            self.assertIn('Object.defineProperty(window,"localStorage"', preview)
+            self.assertIn('Object.defineProperty(window,"sessionStorage"', preview)
 
     def test_preview_rewrites_linked_stylesheet_assets(self) -> None:
         asset = self.root / "badge.svg"
@@ -421,7 +469,7 @@ class BackendApiTests(unittest.TestCase):
 
             encoded = preview.split("data:text/css;base64,", 1)[1].split('"', 1)[0]
             stylesheet_preview = __import__("base64").b64decode(encoded).decode("utf-8")
-            self.assertIn("/api/media/", stylesheet_preview)
+            self.assertIn("/api/preview-media/", stylesheet_preview)
 
 
 if __name__ == "__main__":

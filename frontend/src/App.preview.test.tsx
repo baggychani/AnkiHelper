@@ -114,6 +114,8 @@ describe('App preview navigation', () => {
     await user.click(await screen.findByRole('button', { name: '실시간 미리보기' }))
     const iframe = await screen.findByTitle('카드 미리보기')
     await waitFor(() => expect(iframe.getAttribute('srcdoc')).toContain('<body class="card card1 win">'))
+    expect(iframe.getAttribute('sandbox')).toBe('allow-scripts')
+    expect(iframe.getAttribute('referrerpolicy')).toBe('no-referrer')
 
     await user.click(screen.getByRole('button', { name: 'AnkiDroid' }))
     await waitFor(() => expect(screen.getByTitle('카드 미리보기').getAttribute('srcdoc')).toContain('card card1 mobile android linux chrome'))
