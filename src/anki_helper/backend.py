@@ -34,6 +34,8 @@ from .anki_package import (
     DeckPackage,
     Field,
     NoteType,
+    SCRIPT_CONTENT,
+    SCRIPT_STRING,
     export_design,
     export_media,
     export_project,
@@ -463,6 +465,26 @@ def _embed_preview_media(
             values.append(" ".join((value, *parts[1:])))
         return f'{match.group("prefix")}"{", ".join(values)}"'
 
+    def replace_script_strings(text: str) -> str:
+        """Rewrite media filenames inside template scripts before they assign img.src."""
+
+        def script_replacer(match: re.Match[str]) -> str:
+            body = match.group("body")
+
+            def string_replacer(string_match: re.Match[str]) -> str:
+                quote_char = string_match.group("quote")
+                raw = string_match.group("value")
+                value = stylesheet_url(raw) or media_url(raw)
+                if value is None:
+                    return string_match.group(0)
+                escaped = value.replace("\\", "\\\\").replace(quote_char, f"\\{quote_char}")
+                return f"{quote_char}{escaped}{quote_char}"
+
+            new_body = SCRIPT_STRING.sub(string_replacer, body)
+            return match.group(0) if new_body == body else match.group(0).replace(body, new_body, 1)
+
+        return SCRIPT_CONTENT.sub(script_replacer, text)
+
     def replace_sound(match: re.Match[str]) -> str:
         filename = html.unescape(match.group("filename"))
         value = media_url(filename)
@@ -499,19 +521,36 @@ try{{
   Object.defineProperty(window,"sessionStorage",{{configurable:true,value:storageFor(cardState.session)}});
   Object.defineProperty(window,"localStorage",{{configurable:true,value:storageFor(cardState.local)}});
 }}catch(_error){{}}
+try{{
+  Object.defineProperty(Document.prototype,"baseURI",{{configurable:true,get:()=>"https://preview.invalid/"}});
+}}catch(_error){{}}
+const leaf=value=>{{
+  const plain=String(value).split(/[?#]/,1)[0].replace(/\\\\/g,"/");
+  const name=plain.split("/").filter(Boolean).pop()||plain;
+  try{{return decodeURIComponent(name);}}catch(_error){{return name;}}
+}};
 const resolve=value=>{{
   if(typeof value!=="string")return value;
+  if(assets[value])return assets[value];
   const plain=value.split(/[?#]/,1)[0];
-  let filename=plain;
-  try{{filename=decodeURIComponent(new URL(plain,document.baseURI).pathname.split("/").pop()||plain);}}catch(_error){{}}
-  return assets[value]||assets[plain]||assets[filename]||value;
+  if(assets[plain])return assets[plain];
+  let filename=leaf(plain);
+  try{{filename=decodeURIComponent(new URL(plain,"https://preview.invalid/").pathname.split("/").filter(Boolean).pop()||filename);}}catch(_error){{}}
+  return assets[filename]||assets[leaf(plain)]||value;
 }};
 const resolveSrcset=value=>typeof value==="string"?value.split(",").map(candidate=>{{const parts=candidate.trim().split(/\\s+/,2);return [resolve(parts[0]),parts[1]].filter(Boolean).join(" ");}}).join(", "):value;
 const resolveCss=value=>typeof value==="string"?value.replace(/url\\((['\\"]?)(.*?)\\1\\)/g,(_match,quote,url)=>`url(${{quote}}${{resolve(url)}}${{quote}})`):value;
 const patch=(prototype,property,map=resolve)=>{{
-  const descriptor=Object.getOwnPropertyDescriptor(prototype,property);
-  if(!descriptor||!descriptor.get||!descriptor.set)return;
-  Object.defineProperty(prototype,property,{{...descriptor,set(value){{descriptor.set.call(this,map(value));}}}});
+  try{{
+    let descriptor,target=prototype;
+    while(target&&target!==Object.prototype){{
+      descriptor=Object.getOwnPropertyDescriptor(target,property);
+      if(descriptor)break;
+      target=Object.getPrototypeOf(target);
+    }}
+    if(!descriptor||typeof descriptor.get!=="function"||typeof descriptor.set!=="function")return;
+    Object.defineProperty(prototype,property,{{configurable:true,enumerable:!!descriptor.enumerable,get:descriptor.get,set(value){{descriptor.set.call(this,map(value));}}}});
+  }}catch(_error){{}}
 }};
 patch(HTMLImageElement.prototype,"src");
 patch(HTMLAudioElement.prototype,"src");
@@ -522,16 +561,20 @@ patch(HTMLVideoElement.prototype,"poster");
 patch(HTMLLinkElement.prototype,"href");
 for(const property of ["background","backgroundImage","borderImage","content","cursor","listStyle","mask","maskImage"])
   patch(CSSStyleDeclaration.prototype,property,resolveCss);
-const nativeSetProperty=CSSStyleDeclaration.prototype.setProperty;
-CSSStyleDeclaration.prototype.setProperty=function(name,value,priority){{
-  return nativeSetProperty.call(this,name,resolveCss(value),priority);
-}};
-const setAttribute=Element.prototype.setAttribute;
-Element.prototype.setAttribute=function(name,value){{
-  const attribute=String(name).toLowerCase();
-  const next=attribute==="srcset"?resolveSrcset(value):["src","poster","href"].includes(attribute)?resolve(value):attribute==="style"?resolveCss(value):value;
-  return setAttribute.call(this,name,next);
-}};
+try{{
+  const nativeSetProperty=CSSStyleDeclaration.prototype.setProperty;
+  CSSStyleDeclaration.prototype.setProperty=function(name,value,priority){{
+    return nativeSetProperty.call(this,name,resolveCss(value),priority);
+  }};
+}}catch(_error){{}}
+try{{
+  const setAttribute=Element.prototype.setAttribute;
+  Element.prototype.setAttribute=function(name,value){{
+    const attribute=String(name).toLowerCase();
+    const next=attribute==="srcset"?resolveSrcset(value):["src","poster","href"].includes(attribute)?resolve(value):attribute==="style"?resolveCss(value):value;
+    return setAttribute.call(this,name,next);
+  }};
+}}catch(_error){{}}
 const rewriteElement=element=>{{
   if(!(element instanceof Element))return;
   for(const name of ["src","srcset","poster","href"]){{
@@ -541,12 +584,17 @@ const rewriteElement=element=>{{
   if(element instanceof HTMLStyleElement){{const next=resolveCss(element.textContent);if(next!==element.textContent)element.textContent=next;}}
   element.querySelectorAll?.("[src],[srcset],[poster],[href],[style],style").forEach(rewriteElement);
 }};
-new MutationObserver(records=>records.forEach(record=>{{
-  if(record.type==="attributes")rewriteElement(record.target);
-  record.addedNodes.forEach(rewriteElement);
-}})).observe(document.documentElement,{{childList:true,subtree:true,attributes:true,attributeFilter:["src","srcset","poster","href","style"]}});
-const originalFetch=window.fetch.bind(window);
-window.fetch=(input,...rest)=>originalFetch(typeof input==="string"?resolve(input):input instanceof URL?new URL(resolve(input.href)):input,...rest);
+try{{
+  new MutationObserver(records=>records.forEach(record=>{{
+    if(record.type==="attributes")rewriteElement(record.target);
+    record.addedNodes.forEach(rewriteElement);
+  }})).observe(document.documentElement,{{childList:true,subtree:true,attributes:true,attributeFilter:["src","srcset","poster","href","style"]}});
+}}catch(_error){{}}
+try{{rewriteElement(document.documentElement);}}catch(_error){{}}
+try{{
+  const originalFetch=window.fetch.bind(window);
+  window.fetch=(input,...rest)=>originalFetch(typeof input==="string"?resolve(input):input instanceof URL?new URL(resolve(input.href)):input,...rest);
+}}catch(_error){{}}
 window.__ankiHelperResolveMediaUrl=resolve;
 }})();</script>"""
 
@@ -555,6 +603,7 @@ window.__ankiHelperResolveMediaUrl=resolve;
         markup = _preview_url_attribute.sub(replace_src, markup)
         markup = _srcset_attribute.sub(replace_srcset, markup)
         markup = _css_import.sub(replace_css_import, markup)
+        markup = replace_script_strings(markup)
         return runtime_resolver() + _css_url.sub(replace_css_url, markup)
     finally:
         if archive is not None:

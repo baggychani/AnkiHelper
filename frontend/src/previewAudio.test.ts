@@ -26,6 +26,7 @@ describe('preview audio script', () => {
     expect(doc).toContain("form-action 'none'")
     expect(doc).toContain("navigate-to 'none'")
     expect(doc).toContain('connect-src http://127.0.0.1:8765')
+    expect(doc).not.toContain('transform:none!important')
   })
 
   it('exposes AnkiDroid and night-mode CSS classes', () => {

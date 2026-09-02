@@ -463,6 +463,11 @@ class BackendApiTests(unittest.TestCase):
             self.assertIn('attributeFilter:["src","srcset","poster","href","style"]', preview)
             self.assertIn("element instanceof HTMLStyleElement", preview)
             self.assertLess(preview.index('patch(HTMLImageElement.prototype,"src")'), preview.index("image.src = filename"))
+            self.assertIn("https://preview.invalid/", preview)
+            self.assertIn('plain.split("/").filter(Boolean).pop()', preview)
+            self.assertNotIn("document.baseURI", preview)
+            self.assertRegex(preview, r'const filename = "http://[^"]+/api/preview-media/[^"]+"')
+            self.assertRegex(preview, r'link\.href = "data:text/css;base64,')
 
     def test_preview_uses_opaque_iframe_storage_without_parent_access(self) -> None:
         with TestClient(backend.app) as client:
