@@ -26,6 +26,9 @@ describe('preview audio script', () => {
     expect(doc).toContain("form-action 'none'")
     expect(doc).toContain("navigate-to 'none'")
     expect(doc).toContain('connect-src http://127.0.0.1:8765')
+    expect(doc).toContain('width=1280,initial-scale=1')
+    expect(doc).not.toContain('width=device-width')
+    expect(doc).not.toContain('img{max-width:100%;max-height:100%}')
     expect(doc).not.toContain('transform:none!important')
   })
 
@@ -33,7 +36,7 @@ describe('preview audio script', () => {
     const doc = buildPreviewDocument('back', { platform: 'ankidroid', nightMode: true })
 
     expect(doc).toContain('mobile android linux chrome nightMode night_mode ankidroid_dark_mode')
-    expect(doc).toContain('<meta name="viewport"')
+    expect(doc).toContain('<meta name="viewport" content="width=360,initial-scale=1">')
     expect(doc).toContain('<body class="card card1 mobile android linux chrome nightMode night_mode ankidroid_dark_mode">')
   })
 })

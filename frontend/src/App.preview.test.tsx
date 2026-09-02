@@ -70,7 +70,7 @@ describe('App preview navigation', () => {
     expect(calls.slice(-3)).toEqual(['back-0', 'front-1', 'back-1'])
   })
 
-  it('removes the stale iframe until the requested next-card document arrives', async () => {
+  it('keeps the current card visible until the next document arrives', async () => {
     let resolveNext: ((value: { html: string }) => void) | undefined
     vi.mocked(api.preview).mockImplementation(async (_noteTypeId, _templateIndex, side, noteIndex) => {
       if (side === 'front' && noteIndex === 1) {
@@ -87,10 +87,10 @@ describe('App preview navigation', () => {
     await waitFor(() => expect(screen.getByTitle('카드 미리보기').getAttribute('srcdoc')).toContain('back-0'))
 
     await user.click(screen.getByRole('button', { name: '다음' }))
-    expect(screen.queryByTitle('카드 미리보기')).toBeNull()
-    expect(screen.getByRole('status', { name: '' }).textContent).toContain('카드를 불러오는 중')
-    expect(screen.getByRole('button', { name: '뒷면' }).hasAttribute('disabled')).toBe(true)
-    expect(screen.getByRole('button', { name: '다음' }).hasAttribute('disabled')).toBe(true)
+    expect(screen.getByTitle('카드 미리보기').getAttribute('srcdoc')).toContain('back-0')
+    expect(screen.queryByRole('status')).toBeNull()
+    expect(screen.getByRole('button', { name: '뒷면' }).hasAttribute('disabled')).toBe(false)
+    expect(screen.getByRole('button', { name: '다음' }).hasAttribute('disabled')).toBe(false)
 
     await waitFor(() => expect(resolveNext).toBeTypeOf('function'))
     resolveNext?.({ html: '<div data-preview="front-1">front-1</div>' })
@@ -113,9 +113,11 @@ describe('App preview navigation', () => {
 
     await user.click(await screen.findByRole('button', { name: '실시간 미리보기' }))
     const iframe = await screen.findByTitle('카드 미리보기') as HTMLIFrameElement
-    await waitFor(() => expect(iframe.getAttribute('srcdoc')).toContain('<body class="card card1 win">'))
+    await waitFor(() => expect(screen.getByTitle('카드 미리보기').getAttribute('srcdoc')).toContain('<body class="card card1 win">'))
     expect(iframe.getAttribute('sandbox')).toBe('allow-scripts')
     expect(iframe.getAttribute('referrerpolicy')).toBe('no-referrer')
+    expect(iframe.style.width).toBe('1280px')
+    expect(iframe.style.height).toBe('720px')
     const originalSrcDoc = iframe.getAttribute('srcdoc')
 
     const postMessageSpy = vi.spyOn(iframe.contentWindow as Window, 'postMessage')
@@ -123,6 +125,8 @@ describe('App preview navigation', () => {
     await user.click(screen.getByRole('button', { name: 'AnkiDroid' }))
     await waitFor(() => expect(postMessageSpy).toHaveBeenCalledWith({ type: 'ankihelper:appearance', platform: 'ankidroid', nightMode: false }, '*'))
     expect(screen.getByText('ANKIDROID 미리보기')).toBeTruthy()
+    expect(iframe.style.width).toBe('360px')
+    expect(iframe.style.height).toBe('800px')
 
     await user.click(screen.getByRole('button', { name: '야간 모드' }))
     await waitFor(() => expect(postMessageSpy).toHaveBeenCalledWith({ type: 'ankihelper:appearance', platform: 'ankidroid', nightMode: true }, '*'))

@@ -19,6 +19,11 @@ export function buildPreviewAudioScript(): string {
 
 export type PreviewPlatform = 'desktop' | 'ankidroid'
 
+export const PREVIEW_SCREEN: Record<PreviewPlatform, { width: number; height: number }> = {
+  desktop: { width: 1280, height: 720 },
+  ankidroid: { width: 360, height: 800 },
+}
+
 export type PreviewDocumentOptions = {
   templateIndex?: number
   platform?: PreviewPlatform
@@ -41,7 +46,8 @@ function nightClassesFor(platform: PreviewPlatform): string[] {
  */
 function buildAppearanceScript(): string {
   const platformClassesJson = JSON.stringify(PLATFORM_CLASSES)
-  return `<script>(()=>{const PLATFORM_CLASSES=${platformClassesJson};const nightClassesFor=(platform)=>platform==="ankidroid"?["nightMode","night_mode","ankidroid_dark_mode"]:["nightMode"];const allPlatformClasses=Object.values(PLATFORM_CLASSES).flat();const allNightClasses=["nightMode","night_mode","ankidroid_dark_mode"];const apply=(platform,nightMode)=>{const targets=[document.documentElement,document.body];for(const target of targets){target.classList.remove(...allPlatformClasses,...allNightClasses);target.classList.add(...(PLATFORM_CLASSES[platform]||PLATFORM_CLASSES.desktop));if(nightMode)target.classList.add(...nightClassesFor(platform))}};window.addEventListener("message",(event)=>{const data=event.data;if(!data||data.type!=="ankihelper:appearance")return;apply(data.platform,data.nightMode)})})()</script>`
+  const screenJson = JSON.stringify(PREVIEW_SCREEN)
+  return `<script>(()=>{const PLATFORM_CLASSES=${platformClassesJson};const SCREEN=${screenJson};const nightClassesFor=(platform)=>platform==="ankidroid"?["nightMode","night_mode","ankidroid_dark_mode"]:["nightMode"];const allPlatformClasses=Object.values(PLATFORM_CLASSES).flat();const allNightClasses=["nightMode","night_mode","ankidroid_dark_mode"];const apply=(platform,nightMode)=>{const targets=[document.documentElement,document.body];for(const target of targets){target.classList.remove(...allPlatformClasses,...allNightClasses);target.classList.add(...(PLATFORM_CLASSES[platform]||PLATFORM_CLASSES.desktop));if(nightMode)target.classList.add(...nightClassesFor(platform))}const screen=SCREEN[platform]||SCREEN.desktop;const meta=document.querySelector('meta[name="viewport"]');if(meta)meta.setAttribute("content","width="+screen.width+",initial-scale=1")};window.addEventListener("message",(event)=>{const data=event.data;if(!data||data.type!=="ankihelper:appearance")return;apply(data.platform,data.nightMode)})})()</script>`
 }
 
 export function buildPreviewDocument(previewHtml: string, options: PreviewDocumentOptions = {}): string {
@@ -52,6 +58,7 @@ export function buildPreviewDocument(previewHtml: string, options: PreviewDocume
   const nightClasses = nightMode ? nightClassesFor(platform) : []
   const documentClasses = [...platformClasses, ...nightClasses].join(' ')
   const bodyClasses = ['card', `card${templateIndex + 1}`, ...platformClasses, ...nightClasses].join(' ')
-  const defaults = 'html,body{min-height:100%;margin:0}body{box-sizing:border-box;background:#fff;overflow-wrap:break-word;transition:background-color .25s ease,color .25s ease}img{max-width:100%;max-height:100%}video{max-width:100%}body.nightMode{background:#2f2f31;color:#f5f5f5}body.ankidroid_dark_mode{background:#303030}'
-  return `<!doctype html><html class="${documentClasses}"><head><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="${previewContentSecurityPolicy}"><style>${defaults}</style></head><body class="${bodyClasses}">${previewHtml}${buildPreviewAudioScript()}${buildAppearanceScript()}</body></html>`
+  const screen = PREVIEW_SCREEN[platform]
+  const defaults = 'html,body{width:100%;height:100%;margin:0}body{box-sizing:border-box;background:#fff;overflow-wrap:break-word}video{max-width:100%}body.nightMode{background:#2f2f31;color:#f5f5f5}body.ankidroid_dark_mode{background:#303030}'
+  return `<!doctype html><html class="${documentClasses}"><head><meta name="viewport" content="width=${screen.width},initial-scale=1"><meta http-equiv="Content-Security-Policy" content="${previewContentSecurityPolicy}"><style>${defaults}</style></head><body class="${bodyClasses}">${previewHtml}${buildPreviewAudioScript()}${buildAppearanceScript()}</body></html>`
 }

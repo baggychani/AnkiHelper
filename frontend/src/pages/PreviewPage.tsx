@@ -1,28 +1,24 @@
-import { useEffect, useRef, useState } from 'react'
+import { useLayoutEffect, useRef, useState } from 'react'
 import { ArrowLeft, ArrowRight, Monitor, Moon, Smartphone, Sun } from 'lucide-react'
 import type { NoteType } from '../api'
 import { initialPreviewState, type PreviewSide } from '../previewLifecycle'
-import { buildPreviewDocument, type PreviewPlatform } from '../previewAudio'
+import { buildPreviewDocument, PREVIEW_SCREEN, type PreviewPlatform } from '../previewAudio'
 
-// The card renders inside the iframe at a real device resolution (so text
-// wrapping, font sizes, and layout all come out exactly as they would on an
-// actual PC browser window or an actual phone) and the whole thing is then
-// visually scaled down with `transform: scale()` to fit a modest on-screen
-// mockup. Resizing the mockup box alone (without this) would just cram real
-// desktop-width content into a shrunken box instead of showing a phone-sized
-// layout.
-const DEVICE_VIEWPORT: Record<PreviewPlatform, { width: number; height: number }> = {
-  desktop: { width: 1040, height: 640 },
-  ankidroid: { width: 400, height: 868 },
-}
-// On-screen footprint ceilings - deliberately modest; the phone mockup is
-// meant to look smaller on screen than the PC mockup, not fill the panel.
-const DISPLAY_BUDGET: Record<PreviewPlatform, { maxWidth: number; maxHeight: number }> = {
-  desktop: { maxWidth: 640, maxHeight: 400 },
-  ankidroid: { maxWidth: 280, maxHeight: 608 },
-}
-const STAGE_PADDING = 24
 const TITLE_BAR_HEIGHT = 44
+const STAGE_PADDING = 24
+const FRAME_BEZEL: Record<PreviewPlatform, number> = { desktop: 7, ankidroid: 10 }
+const FRAME_RADIUS: Record<PreviewPlatform, number> = { desktop: 28, ankidroid: 38 }
+
+function frameSize(platform: PreviewPlatform) {
+  const screen = PREVIEW_SCREEN[platform]
+  const bezel = FRAME_BEZEL[platform]
+  return {
+    screen,
+    bezel,
+    width: screen.width + bezel * 2,
+    height: TITLE_BAR_HEIGHT + screen.height + bezel * 2,
+  }
+}
 
 export function PreviewPage({ noteType, templateIndex, previewState, previewKey, previewHtml, onSide, onNavigate }: {
   noteType?: NoteType
@@ -38,37 +34,34 @@ export function PreviewPage({ noteType, templateIndex, previewState, previewKey,
   const stageRef = useRef<HTMLDivElement>(null)
   const iframeRef = useRef<HTMLIFrameElement>(null)
   const [stageSize, setStageSize] = useState({ width: 1000, height: 700 })
-
-  // Rebuilding the iframe document (and reloading it) only when the underlying
-  // card content changes - not on every platform/night-mode toggle - is what
-  // keeps those toggles from flashing blank white like a page refresh.
-  const loadedKeyRef = useRef<string | null>(null)
   const appliedAppearanceRef = useRef({ platform, nightMode })
-  const [doc, setDoc] = useState<string | null>(null)
-  const effectiveKey = previewHtml === null ? null : previewKey
-  if (loadedKeyRef.current !== effectiveKey) {
-    loadedKeyRef.current = effectiveKey
-    setDoc(previewHtml === null ? null : buildPreviewDocument(previewHtml, { templateIndex, platform, nightMode }))
-  }
+  const [doc, setDoc] = useState<{ key: string; html: string } | null>(null)
 
-  useEffect(() => {
-    // A fresh document already bakes in the platform/night-mode it was built
-    // with, so treat it as already applied and skip a redundant postMessage.
+  useLayoutEffect(() => {
+    if (previewHtml === null) return
+    setDoc((current) => current?.key === previewKey ? current : {
+      key: previewKey,
+      html: buildPreviewDocument(previewHtml, { templateIndex, platform, nightMode }),
+    })
+  }, [previewHtml, previewKey, templateIndex, platform, nightMode])
+
+  useLayoutEffect(() => {
     appliedAppearanceRef.current = { platform, nightMode }
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally tracks `doc`, not the live platform/nightMode values
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- tracks `doc` so a freshly built document is not restyled
   }, [doc])
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (appliedAppearanceRef.current.platform === platform && appliedAppearanceRef.current.nightMode === nightMode) return
     appliedAppearanceRef.current = { platform, nightMode }
     iframeRef.current?.contentWindow?.postMessage({ type: 'ankihelper:appearance', platform, nightMode }, '*')
   }, [platform, nightMode])
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const stage = stageRef.current
     if (!stage) return
     const recompute = () => {
       const rect = stage.getBoundingClientRect()
+      if (rect.width < 1 || rect.height < 1) return
       setStageSize((current) => current.width === rect.width && current.height === rect.height ? current : { width: rect.width, height: rect.height })
     }
     recompute()
@@ -82,34 +75,34 @@ export function PreviewPage({ noteType, templateIndex, previewState, previewKey,
   const total = Math.max(noteType.notes.length, 1)
   const { noteIndex, side } = previewState
   const deviceLabel = platform === 'ankidroid' ? 'ANKIDROID' : 'ANKI PC'
-
-  // Derived fresh every render from the *current* platform, so a platform
-  // switch never shows one frame of mismatched device size vs. scale.
-  const device = DEVICE_VIEWPORT[platform]
-  const budget = DISPLAY_BUDGET[platform]
+  const frame = frameSize(platform)
   const availableWidth = Math.max(0, stageSize.width - STAGE_PADDING)
-  const availableHeight = Math.max(0, stageSize.height - STAGE_PADDING - TITLE_BAR_HEIGHT)
-  const maxWidth = Math.min(budget.maxWidth, availableWidth || budget.maxWidth)
-  const maxHeight = Math.min(budget.maxHeight, availableHeight || budget.maxHeight)
-  const scale = Math.max(0.05, Math.min(maxWidth / device.width, maxHeight / device.height))
-  const displayWidth = device.width * scale
-  const displayHeight = device.height * scale
+  const availableHeight = Math.max(0, stageSize.height - STAGE_PADDING)
+  const scale = Math.max(0.05, Math.min(availableWidth / frame.width, availableHeight / frame.height, 1))
 
   return <div className="mx-auto grid h-full min-h-[480px] max-w-[1420px] gap-3 lg:min-h-[620px] lg:grid-cols-[minmax(0,1fr)_230px] lg:gap-5 xl:grid-cols-[minmax(0,1fr)_250px]">
-    <section ref={stageRef} className="grid min-h-0 place-items-center rounded-[20px] bg-[#172033] p-3 lg:rounded-[26px] lg:p-5">
-      <div
-        style={{ width: displayWidth, height: TITLE_BAR_HEIGHT + displayHeight }}
-        className={`flex flex-col overflow-hidden border-[#0a0f1d] bg-white shadow-2xl transition-[width,height,border-radius,border-width] duration-500 ease-out ${platform === 'ankidroid' ? 'rounded-[38px] border-[10px]' : 'rounded-[24px] border-[6px] lg:rounded-[28px] lg:border-[7px]'}`}
-      >
-        <div className="flex h-11 shrink-0 items-center justify-between border-b px-5 text-[11px] text-slate-400"><span className="h-2 w-2 rounded-full bg-emerald-400" /><b>{deviceLabel} 미리보기</b><span>{noteIndex + 1} / {total}</span></div>
-        <div className="relative min-h-0 flex-1 overflow-hidden">
-          {doc === null ? <div role="status" className="grid h-full place-items-center text-xs font-medium text-slate-400">카드를 불러오는 중…</div> : (
-            <div style={{ width: device.width, height: device.height, transform: `scale(${scale})`, transformOrigin: 'top left', transition: 'transform 500ms ease-out' }}>
-              <iframe ref={iframeRef} key={previewKey} title="카드 미리보기" sandbox="allow-scripts" referrerPolicy="no-referrer" srcDoc={doc} style={{ width: device.width, height: device.height, border: 0 }} />
+    <section ref={stageRef} className="grid min-h-0 place-items-center overflow-hidden rounded-[20px] bg-[#172033] p-3 lg:rounded-[26px] lg:p-5">
+      {doc === null ? <div role="status" className="grid h-full min-h-40 place-items-center text-xs font-medium text-slate-400">카드를 불러오는 중…</div> : (
+        <div style={{ width: frame.width * scale, height: frame.height * scale, overflow: 'hidden' }}>
+          <div style={{ width: frame.width, height: frame.height, transform: `scale(${scale})`, transformOrigin: 'top left' }}>
+            <div
+              className="flex flex-col overflow-hidden border-[#0a0f1d] bg-white shadow-2xl"
+              style={{ width: frame.width, height: frame.height, borderStyle: 'solid', borderWidth: frame.bezel, borderRadius: FRAME_RADIUS[platform], boxSizing: 'border-box' }}
+            >
+              <div className="flex h-11 shrink-0 items-center justify-between border-b px-5 text-[11px] text-slate-400"><span className="h-2 w-2 rounded-full bg-emerald-400" /><b>{deviceLabel} 미리보기</b><span>{noteIndex + 1} / {total}</span></div>
+              <iframe
+                ref={iframeRef}
+                key={doc.key}
+                title="카드 미리보기"
+                sandbox="allow-scripts"
+                referrerPolicy="no-referrer"
+                srcDoc={doc.html}
+                style={{ width: frame.screen.width, height: frame.screen.height, border: 0, display: 'block' }}
+              />
             </div>
-          )}
+          </div>
         </div>
-      </div>
+      )}
     </section>
     <aside className="flex min-h-[170px] flex-col rounded-[18px] border border-slate-200/70 bg-white p-4 shadow-card lg:rounded-[22px] lg:p-5">
       <h2 className="text-lg font-semibold">실시간 미리보기</h2>
