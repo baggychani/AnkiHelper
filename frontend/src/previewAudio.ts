@@ -25,16 +25,33 @@ export type PreviewDocumentOptions = {
   nightMode?: boolean
 }
 
+const PLATFORM_CLASSES: Record<PreviewPlatform, string[]> = {
+  desktop: ['win'],
+  ankidroid: ['mobile', 'android', 'linux', 'chrome'],
+}
+
+function nightClassesFor(platform: PreviewPlatform): string[] {
+  return platform === 'ankidroid' ? ['nightMode', 'night_mode', 'ankidroid_dark_mode'] : ['nightMode']
+}
+
+/**
+ * Listens for appearance updates from the parent window so switching PC/AnkiDroid
+ * or night mode can restyle the already-loaded document instead of forcing a full
+ * iframe reload (which flashes blank white and interrupts autoplaying audio).
+ */
+function buildAppearanceScript(): string {
+  const platformClassesJson = JSON.stringify(PLATFORM_CLASSES)
+  return `<script>(()=>{const PLATFORM_CLASSES=${platformClassesJson};const nightClassesFor=(platform)=>platform==="ankidroid"?["nightMode","night_mode","ankidroid_dark_mode"]:["nightMode"];const allPlatformClasses=Object.values(PLATFORM_CLASSES).flat();const allNightClasses=["nightMode","night_mode","ankidroid_dark_mode"];const apply=(platform,nightMode)=>{const targets=[document.documentElement,document.body];for(const target of targets){target.classList.remove(...allPlatformClasses,...allNightClasses);target.classList.add(...(PLATFORM_CLASSES[platform]||PLATFORM_CLASSES.desktop));if(nightMode)target.classList.add(...nightClassesFor(platform))}};window.addEventListener("message",(event)=>{const data=event.data;if(!data||data.type!=="ankihelper:appearance")return;apply(data.platform,data.nightMode)})})()</script>`
+}
+
 export function buildPreviewDocument(previewHtml: string, options: PreviewDocumentOptions = {}): string {
   const templateIndex = Math.max(0, options.templateIndex ?? 0)
   const platform = options.platform ?? 'desktop'
   const nightMode = options.nightMode ?? false
-  const platformClasses = platform === 'ankidroid' ? ['mobile', 'android', 'linux', 'chrome'] : ['win']
-  const nightClasses = nightMode
-    ? ['nightMode', ...(platform === 'ankidroid' ? ['night_mode', 'ankidroid_dark_mode'] : [])]
-    : []
+  const platformClasses = PLATFORM_CLASSES[platform]
+  const nightClasses = nightMode ? nightClassesFor(platform) : []
   const documentClasses = [...platformClasses, ...nightClasses].join(' ')
   const bodyClasses = ['card', `card${templateIndex + 1}`, ...platformClasses, ...nightClasses].join(' ')
-  const defaults = 'html,body{min-height:100%;margin:0}body{box-sizing:border-box;background:#fff;overflow-wrap:break-word}img{max-width:100%;max-height:100%}video{max-width:100%}body.nightMode{background:#2f2f31;color:#f5f5f5}body.ankidroid_dark_mode{background:#303030}'
-  return `<!doctype html><html class="${documentClasses}"><head><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="${previewContentSecurityPolicy}"><style>${defaults}</style></head><body class="${bodyClasses}">${previewHtml}${buildPreviewAudioScript()}</body></html>`
+  const defaults = 'html,body{min-height:100%;margin:0}body{box-sizing:border-box;background:#fff;overflow-wrap:break-word;transition:background-color .25s ease,color .25s ease}img{max-width:100%;max-height:100%}video{max-width:100%}body.nightMode{background:#2f2f31;color:#f5f5f5}body.ankidroid_dark_mode{background:#303030}'
+  return `<!doctype html><html class="${documentClasses}"><head><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="${previewContentSecurityPolicy}"><style>${defaults}</style></head><body class="${bodyClasses}">${previewHtml}${buildPreviewAudioScript()}${buildAppearanceScript()}<style>*{transform:none!important;will-change:auto!important;animation:none!important}</style></body></html>`
 }

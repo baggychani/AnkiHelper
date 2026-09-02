@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import quote
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
@@ -907,7 +907,7 @@ def update_field(note_type_id: str, field_order: int, patch: FieldPatch) -> dict
         raise HTTPException(status_code=400, detail="같은 이름의 필드가 이미 있습니다.")
     old_name = field.name
     field.name = name
-    token_pattern = re.compile(r"(\{\{(?:[#^])?\s*)" + re.escape(old_name) + r"(\s*(?::[^{}]+)?\s*\}\})")
+    token_pattern = re.compile(r"(\{\{(?:[#^/])?\s*)" + re.escape(old_name) + r"(\s*(?::[^{}]+)?\s*\}\})")
     for template in note_type.templates:
         template.front = token_pattern.sub(r"\g<1>" + name + r"\g<2>", template.front)
         template.back = token_pattern.sub(r"\g<1>" + name + r"\g<2>", template.back)
@@ -943,7 +943,7 @@ def delete_field(note_type_id: str, field_order: int) -> dict:
     for values in note_type.notes:
         if field_index < len(values):
             del values[field_index]
-    token_pattern = re.compile(r"\{\{(?:[#^])?\s*" + re.escape(old_name) + r"(?:\s*:[^{}]+)?\s*\}\}")
+    token_pattern = re.compile(r"\{\{(?:[#^/])?\s*" + re.escape(old_name) + r"(?:\s*:[^{}]+)?\s*\}\}")
     for template in note_type.templates:
         template.front = token_pattern.sub("", template.front)
         template.back = token_pattern.sub("", template.back)
@@ -1133,6 +1133,7 @@ def download_export(
     note_type_id: str,
     kind: Literal["tsv", "design", "bundle", "media", "project"],
     media_type: Literal["audio", "image", "video", "font", "other"] | None = None,
+    names: list[str] | None = Query(default=None),
 ) -> FileResponse:
     package = _backend_state().package
     note_type = _get_note_type(note_type_id)
@@ -1155,7 +1156,7 @@ def download_export(
         elif kind == "media":
             if package is None:
                 raise HTTPException(status_code=404, detail="패키지를 찾지 못했습니다.")
-            export_media(package, target, media_type)
+            export_media(package, target, media_type, set(names) if names else None)
         elif kind == "project":
             if package is None:
                 raise HTTPException(status_code=404, detail="패키지를 찾지 못했습니다.")

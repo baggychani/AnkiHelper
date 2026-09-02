@@ -75,9 +75,9 @@ export function Welcome({ onOpen, busy, dragActive }: { onOpen: () => void; busy
         <div className="welcome-rise welcome-sparkle-shell mx-auto mb-5 grid h-14 w-14 place-items-center rounded-[19px] bg-white/10 ring-1 ring-white/15 lg:mb-7 lg:h-16 lg:w-16 lg:rounded-[22px]">
           <Sparkles className="text-violet-200" size={29} />
         </div>
-        <h2 className="text-[34px] font-semibold leading-[1.2] tracking-[-.045em] text-white sm:text-[38px] lg:text-[42px]">
+        <h2 className="text-[36px] font-extrabold leading-[1.14] tracking-[-.05em] text-white sm:text-[40px] lg:text-[46px]">
           <span className="welcome-rise welcome-delay-title block">복잡한 Anki 파일,</span>
-          <span className="welcome-rise welcome-delay-subtitle block bg-gradient-to-r from-violet-300 to-cyan-200 bg-clip-text text-transparent">누구보다 쉽게 다루세요.</span>
+          <span className="welcome-rise welcome-delay-subtitle block bg-gradient-to-r from-indigo-300 via-violet-300 to-cyan-200 bg-clip-text text-transparent">누구보다 쉽게 다루세요.</span>
         </h2>
         <p className="welcome-rise welcome-delay-copy mt-4 text-sm leading-6 text-slate-400">Excel로 새 덱을 만들거나 기존 APKG를 열어 이어서 편집할 수 있습니다.</p>
         <div className="welcome-rise welcome-delay-action mt-6 flex flex-col justify-center gap-2 sm:flex-row lg:mt-7">

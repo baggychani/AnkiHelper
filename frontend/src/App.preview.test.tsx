@@ -107,21 +107,28 @@ describe('App preview navigation', () => {
     expect(screen.queryByTitle('카드 미리보기')).toBeNull()
   })
 
-  it('switches the preview document between PC, AnkiDroid, and night CSS contexts', async () => {
+  it('switches PC/AnkiDroid and night mode by messaging the live iframe instead of reloading it', async () => {
     const user = userEvent.setup()
     render(<App />)
 
     await user.click(await screen.findByRole('button', { name: '실시간 미리보기' }))
-    const iframe = await screen.findByTitle('카드 미리보기')
+    const iframe = await screen.findByTitle('카드 미리보기') as HTMLIFrameElement
     await waitFor(() => expect(iframe.getAttribute('srcdoc')).toContain('<body class="card card1 win">'))
     expect(iframe.getAttribute('sandbox')).toBe('allow-scripts')
     expect(iframe.getAttribute('referrerpolicy')).toBe('no-referrer')
+    const originalSrcDoc = iframe.getAttribute('srcdoc')
+
+    const postMessageSpy = vi.spyOn(iframe.contentWindow as Window, 'postMessage')
 
     await user.click(screen.getByRole('button', { name: 'AnkiDroid' }))
-    await waitFor(() => expect(screen.getByTitle('카드 미리보기').getAttribute('srcdoc')).toContain('card card1 mobile android linux chrome'))
+    await waitFor(() => expect(postMessageSpy).toHaveBeenCalledWith({ type: 'ankihelper:appearance', platform: 'ankidroid', nightMode: false }, '*'))
     expect(screen.getByText('ANKIDROID 미리보기')).toBeTruthy()
 
     await user.click(screen.getByRole('button', { name: '야간 모드' }))
-    await waitFor(() => expect(screen.getByTitle('카드 미리보기').getAttribute('srcdoc')).toContain('nightMode night_mode ankidroid_dark_mode'))
+    await waitFor(() => expect(postMessageSpy).toHaveBeenCalledWith({ type: 'ankihelper:appearance', platform: 'ankidroid', nightMode: true }, '*'))
+
+    // Toggling platform/night mode must never reload the iframe document -
+    // a fresh srcdoc load is what caused the old refresh-style flicker.
+    expect(screen.getByTitle('카드 미리보기').getAttribute('srcdoc')).toBe(originalSrcDoc)
   })
 })

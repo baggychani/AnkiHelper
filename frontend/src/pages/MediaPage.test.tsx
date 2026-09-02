@@ -34,7 +34,7 @@ describe('MediaPage filtered exports', () => {
   it('labels a type-filtered export accurately and forwards the media type', async () => {
     const user = userEvent.setup()
     const onExport = vi.fn()
-    render(<MediaPage onExport={onExport} />)
+    render(<MediaPage onExport={onExport} onExportSelected={vi.fn()} notify={vi.fn()} />)
 
     await screen.findByText('answer.mp3')
     expect(screen.getByRole('button', { name: '전체 추출' })).toBeTruthy()
@@ -48,7 +48,7 @@ describe('MediaPage filtered exports', () => {
   it('exposes the other-media filter and exports that category', async () => {
     const user = userEvent.setup()
     const onExport = vi.fn()
-    render(<MediaPage onExport={onExport} />)
+    render(<MediaPage onExport={onExport} onExportSelected={vi.fn()} notify={vi.fn()} />)
 
     await screen.findByText('notes.pdf')
     await user.click(screen.getByRole('button', { name: '기타 1' }))

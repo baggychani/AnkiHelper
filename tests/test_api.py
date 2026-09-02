@@ -151,6 +151,26 @@ class BackendApiTests(unittest.TestCase):
             self.assertEqual(200, deleted.status_code, deleted.text)
             self.assertEqual(["Extra", "Question"], [field["name"] for field in deleted.json()["note_types"][0]["fields"]])
 
+    def test_field_rename_and_delete_update_conditional_template_sections(self) -> None:
+        with TestClient(backend.app) as client:
+            _workspace, note_type_id = self._open_workspace(client)
+
+            templated = client.patch(
+                f"/api/note-types/{note_type_id}/templates/0",
+                json={"front": "{{#Back}}Extra: {{Back}}{{/Back}}", "back": None},
+            )
+            self.assertEqual(200, templated.status_code, templated.text)
+
+            renamed = client.patch(f"/api/note-types/{note_type_id}/fields/1", json={"name": "Answer"})
+            self.assertEqual(200, renamed.status_code, renamed.text)
+            front_after_rename = renamed.json()["note_types"][0]["templates"][0]["front"]
+            self.assertEqual("{{#Answer}}Extra: {{Answer}}{{/Answer}}", front_after_rename)
+
+            deleted = client.delete(f"/api/note-types/{note_type_id}/fields/1")
+            self.assertEqual(200, deleted.status_code, deleted.text)
+            front_after_delete = deleted.json()["note_types"][0]["templates"][0]["front"]
+            self.assertEqual("Extra: ", front_after_delete)
+
     def test_project_import_marks_workspace_dirty(self) -> None:
         project_path = self.root / "project.zip"
         export_project(self.package, self.package.note_types[0], project_path)

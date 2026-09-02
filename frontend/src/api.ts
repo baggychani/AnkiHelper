@@ -3,7 +3,7 @@ export type Template = { name: string; front: string; back: string }
 export type NoteType = { id: string; name: string; fields: Field[]; templates: Template[]; css: string; notes: string[][] }
 export type MediaKind = 'audio' | 'image' | 'video' | 'font' | 'other'
 export type MediaItem = { name: string; stored_name: string; size: number; type: MediaKind }
-export type MediaReference = { filename: string; location: string; source: 'field' | 'template' | 'css' | 'script' }
+export type MediaReference = { filename: string; location: string; source: 'field' | 'template' | 'css' | 'script'; card: string | null; side: 'front' | 'back' | null }
 export type MediaHealth = {
   missing: MediaReference[]
   references: Record<string, MediaReference[]>
@@ -149,8 +149,11 @@ export const api = {
   importProject: (path: string) => request<{ workspace: Workspace; note_type_id: string }>('/api/projects/import', { method: 'POST', body: JSON.stringify({ path }) }),
   preview: (noteTypeId: string, templateIndex: number, side: 'front' | 'back', noteIndex: number, signal?: AbortSignal) =>
     request<{ html: string }>(`/api/note-types/${noteTypeId}/preview?template_index=${templateIndex}&side=${side}&note_index=${noteIndex}`, { signal }),
-  exportUrl: (kind: 'tsv' | 'design' | 'bundle' | 'media' | 'project', noteTypeId: string, mediaType?: MediaKind) => {
-    const query = kind === 'media' && mediaType ? `?media_type=${mediaType}` : ''
-    return `${base}/api/note-types/${noteTypeId}/export/${kind}${query}`
+  exportUrl: (kind: 'tsv' | 'design' | 'bundle' | 'media' | 'project', noteTypeId: string, mediaType?: MediaKind, storedNames?: string[]) => {
+    const params = new URLSearchParams()
+    if (kind === 'media' && mediaType) params.set('media_type', mediaType)
+    if (kind === 'media' && storedNames?.length) storedNames.forEach((name) => params.append('names', name))
+    const query = params.toString()
+    return `${base}/api/note-types/${noteTypeId}/export/${kind}${query ? `?${query}` : ''}`
   },
 }

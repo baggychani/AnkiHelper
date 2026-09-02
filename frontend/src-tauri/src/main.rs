@@ -211,7 +211,6 @@ fn free_backend_port() {
     }
 }
 
-#[cfg(debug_assertions)]
 fn spawn_dev_backend() -> Result<Child, String> {
     free_backend_port();
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -245,15 +244,7 @@ fn start_backend() -> Result<Child, String> {
         return spawn_process(Command::new(path));
     }
 
-    #[cfg(debug_assertions)]
-    {
-        return spawn_dev_backend();
-    }
-
-    #[cfg(not(debug_assertions))]
-    {
-        Err("Anki Helper engine file was not found next to the app.".into())
-    }
+    spawn_dev_backend()
 }
 
 #[cfg(windows)]

@@ -121,6 +121,8 @@ class MediaReference:
     filename: str
     location: str
     source: Literal["field", "template", "css", "script"]
+    card: str | None = None
+    side: Literal["front", "back"] | None = None
 
 
 def read_apkg(path: str | Path) -> DeckPackage:
@@ -218,6 +220,7 @@ def _read_legacy_collection(
     source: Path, database_path: Path, media: dict[str, str], entries: set[str], database_name: str
 ) -> DeckPackage:
     connection = sqlite3.connect(database_path)
+    connection.create_collation("unicase", lambda left, right: (left.casefold() > right.casefold()) - (left.casefold() < right.casefold()))
     try:
         models_json = connection.execute("SELECT models FROM col").fetchone()
         if not models_json:
@@ -259,8 +262,6 @@ def _read_normalized_collection(
     source: Path, connection: sqlite3.Connection, media: dict[str, str], entries: set[str], database_name: str
 ) -> DeckPackage:
     """Read Anki's normalized schema used inside collection.anki21b."""
-    # The source DB may reference Anki's custom ``unicase`` collation, which
-    # Python's SQLite build does not register; stable ids avoid depending on it.
     note_type_rows = connection.execute("SELECT id, name, config FROM notetypes ORDER BY id").fetchall()
     fields_by_type: dict[int, list[Field]] = {}
     for type_id, order, name in connection.execute("SELECT ntid, ord, name FROM fields ORDER BY ntid, ord"):
@@ -1381,6 +1382,7 @@ def _unique_media_name(name: str, used: set[str]) -> str:
 def _exportable_media_items(
     package: DeckPackage,
     media_type: Literal["audio", "image", "video", "font", "other"] | None = None,
+    stored_names: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Return media items that can be represented safely in a Windows ZIP extraction.
 
@@ -1391,6 +1393,8 @@ def _exportable_media_items(
     rename the media explicitly.
     """
     items = [item for item in media_items(package) if media_type is None or item["type"] == media_type]
+    if stored_names is not None:
+        items = [item for item in items if item["stored_name"] in stored_names]
     seen_names: set[str] = set()
     for item in items:
         name = item["name"]
@@ -1584,9 +1588,10 @@ def export_media(
     package: DeckPackage,
     destination: str | Path,
     media_type: Literal["audio", "image", "video", "font", "other"] | None = None,
+    stored_names: set[str] | None = None,
 ) -> Path:
     target = Path(destination)
-    items = _exportable_media_items(package, media_type)
+    items = _exportable_media_items(package, media_type, stored_names)
     with zipfile.ZipFile(package.source) as source, zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as output:
         for item in items:
             output.writestr(f"media/{item['name']}", _media_bytes(package, item["stored_name"], source))
@@ -1646,7 +1651,13 @@ def media_health(package: DeckPackage) -> dict[str, Any]:
     references: dict[str, list[MediaReference]] = {}
     missing: list[MediaReference] = []
 
-    def inspect(markup: str, location: str, source: Literal["field", "template", "css"]) -> None:
+    def inspect(
+        markup: str,
+        location: str,
+        source: Literal["field", "template", "css"],
+        card: str | None = None,
+        side: Literal["front", "back"] | None = None,
+    ) -> None:
         for raw, dynamic in _markup_media_values(markup):
             filename = media_reference_filename(raw)
             if filename is None:
@@ -1657,7 +1668,7 @@ def media_health(package: DeckPackage) -> dict[str, Any]:
                 # keys, class names). Report only known media-like missing
                 # paths, while any filename that actually exists stays valid.
                 continue
-            reference = MediaReference(filename=filename, location=location, source="script" if dynamic else source)
+            reference = MediaReference(filename=filename, location=location, source="script" if dynamic else source, card=card, side=side)
             if actual_name:
                 references.setdefault(actual_name, []).append(reference)
             else:
@@ -1666,8 +1677,9 @@ def media_health(package: DeckPackage) -> dict[str, Any]:
     for note_type in package.note_types:
         inspect(note_type.css, f"{note_type.name} · 공통 CSS", "css")
         for template in note_type.templates:
-            inspect(template.front, f"{note_type.name} · {template.name} 앞면", "template")
-            inspect(template.back, f"{note_type.name} · {template.name} 뒷면", "template")
+            card_label = f"{note_type.name} · {template.name}"
+            inspect(template.front, f"{card_label} 앞면", "template", card=card_label, side="front")
+            inspect(template.back, f"{card_label} 뒷면", "template", card=card_label, side="back")
         for note_index, values in enumerate(note_type.notes, 1):
             for field in note_type.fields:
                 if field.order < len(values):

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 import tempfile
 import unittest
 import zipfile
@@ -14,6 +15,7 @@ from anki_helper.anki_package import (
     _decompress_anki21b,
     _encode_modern_media_index,
     _protobuf_parts,
+    _read_legacy_collection,
     create_package_from_table,
     decode_media_payload,
     export_bundle,
@@ -126,6 +128,62 @@ class MediaWorkflowTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "겹치는 미디어 파일 이름"):
             export_media(self.package, archive_path)
         self.assertFalse(archive_path.exists())
+
+    def test_reads_normalized_collection_using_unicase_collated_columns(self) -> None:
+        """Newer Anki exports declare `fields.name`/`templates.name` as COLLATE unicase.
+
+        Python's stdlib sqlite3 does not know that collation, so any query
+        touching those columns must have it registered on the connection first
+        (see the fix alongside this test) or every read of a modern APKG whose
+        collection uses that collation fails with `sqlite3.OperationalError:
+        no query solution`.
+        """
+        def protobuf_string(field: int, value: str) -> bytes:
+            encoded = value.encode("utf-8")
+            tag = (field << 3) | 2
+            return bytes([tag, len(encoded)]) + encoded
+
+        database_path = self.root / "normalized.anki2"
+        connection = sqlite3.connect(database_path)
+        # Only needed to author the fixture; the read path under test opens its
+        # own fresh connection and must register this collation itself.
+        connection.create_collation("unicase", lambda left, right: (left > right) - (left < right))
+        try:
+            connection.executescript(
+                """
+                CREATE TABLE col (id integer PRIMARY KEY, models text);
+                CREATE TABLE notetypes (id integer PRIMARY KEY, name text, config blob);
+                CREATE TABLE fields (
+                    ntid integer NOT NULL, ord integer NOT NULL,
+                    name text NOT NULL COLLATE unicase, config blob NOT NULL,
+                    PRIMARY KEY (ntid, ord)
+                ) without rowid;
+                CREATE TABLE templates (
+                    ntid integer NOT NULL, ord integer NOT NULL,
+                    name text NOT NULL COLLATE unicase, config blob NOT NULL,
+                    PRIMARY KEY (ntid, ord)
+                ) without rowid;
+                CREATE TABLE notes (id integer PRIMARY KEY, mid integer, flds text);
+                """
+            )
+            connection.execute("INSERT INTO col VALUES (1, '')")
+            connection.execute("INSERT INTO notetypes VALUES (1, 'Basic', ?)", (protobuf_string(3, ".card {}"),))
+            connection.execute("INSERT INTO fields VALUES (1, 0, 'Front', x'')")
+            connection.execute("INSERT INTO fields VALUES (1, 1, 'Back', x'')")
+            connection.execute(
+                "INSERT INTO templates VALUES (1, 0, 'Card 1', ?)",
+                (protobuf_string(1, "{{Front}}") + protobuf_string(2, "{{Back}}"),),
+            )
+            connection.execute("INSERT INTO notes VALUES (100, 1, 'question\x1fanswer')")
+            connection.commit()
+        finally:
+            connection.close()
+
+        package = _read_legacy_collection(database_path, database_path, {}, set(), "collection.anki21b")
+        self.assertEqual(1, len(package.note_types))
+        note_type = package.note_types[0]
+        self.assertEqual(["Front", "Back"], [field.name for field in note_type.fields])
+        self.assertEqual([["question", "answer"]], note_type.notes)
 
     @unittest.skipIf(find_spec("zstandard") is None, "zstandard is required for modern Anki media")
     def test_modern_anki_compressed_media_payload_is_decoded(self) -> None:
