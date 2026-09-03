@@ -19,6 +19,7 @@ import sqlite3
 import zipfile
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field as dataclass_field
+from functools import partial
 from pathlib import Path
 from typing import Literal
 from urllib.parse import quote
@@ -34,12 +35,14 @@ from .anki_package import (
     DeckPackage,
     Field,
     NoteType,
+    Template,
     SCRIPT_CONTENT,
     SCRIPT_STRING,
     export_design,
     export_media,
     export_project,
     export_tsv,
+    cloze_ordinals,
     field_content_kind,
     import_project,
     import_media,
@@ -52,6 +55,7 @@ from .anki_package import (
     move_notes_between_types,
     read_apkg,
     remove_media,
+    remove_media_files,
     remove_note_type,
     rename_media,
     render_template,
@@ -119,6 +123,11 @@ _sound_marker = re.compile(
     r"data-sound=(?P<value_quote>[\"'])(?P<filename>.*?)(?P=value_quote)>.*?</span>",
     re.DOTALL,
 )
+_tts_marker = re.compile(
+    r"<span class=(?P<class_quote>[\"'])tts(?P=class_quote)\s+"
+    r"data-tts=(?P<value_quote>[\"'])(?P<spoken>.*?)(?P=value_quote)></span>",
+    re.DOTALL,
+)
 # Anki Desktop / AnkiDroid replay control markup (reviewer.scss defaults).
 _replay_svg = (
     "<svg class='playImage' viewBox='0 0 64 64' version='1.1' aria-hidden='true'>"
@@ -135,6 +144,7 @@ _replay_button_css = (
     ".replay-button svg path{fill:#414141}"
     ".replay-button.playing svg circle{fill:#414141;stroke:#414141}"
     ".replay-button.playing svg path{fill:#fff}"
+    ".replay-button:disabled{opacity:.5;cursor:default}"
 )
 _preview_url_attribute = re.compile(
     r"(?P<prefix>(?<![\w.])(?:src|poster|href)\s*=\s*)(?:(?P<quote>[\"'])(?P<quoted>.*?)(?P=quote)|(?P<bare>[^\s>]+))",
@@ -284,6 +294,11 @@ class MediaImportRequest(BaseModel):
 
 class MediaRenameRequest(BaseModel):
     name: str
+
+
+class MediaDeleteRequest(BaseModel):
+    stored_names: list[str]
+    force: bool = False
 
 
 class ImportProjectRequest(BaseModel):
@@ -486,6 +501,17 @@ def _embed_preview_media(
 
         return SCRIPT_CONTENT.sub(script_replacer, text)
 
+    def replace_tts(match: re.Match[str]) -> str:
+        # Anki synthesizes {{tts}} on demand; keep the control's footprint and
+        # say plainly that the Helper cannot speak it.
+        spoken = html.unescape(match.group("spoken")).strip()
+        label = f"TTS 자리: {spoken}" if spoken else "TTS 자리"
+        return (
+            "<button type='button' class='replay-button soundLink anki-tts' disabled "
+            f"title='미리보기에서는 TTS를 재생하지 않습니다.' aria-label='{html.escape(label, quote=True)}'>"
+            f"<span>{_replay_svg}</span></button>"
+        )
+
     def replace_sound(match: re.Match[str]) -> str:
         filename = html.unescape(match.group("filename"))
         value = media_url(filename)
@@ -497,13 +523,27 @@ def _embed_preview_media(
             f"data-audio='{value}'{autoplay} aria-label='음성 재생'><span>{_replay_svg}</span></button>"
         )
 
-    def runtime_resolver() -> str:
-        """Map dynamic DOM media assignments before template scripts execute."""
+    def runtime_resolver(scope: str | None) -> str:
+        """Map dynamic DOM media assignments before template scripts execute.
+
+        A template script can build a filename at runtime, so a card that has
+        one gets the whole media map.  Cards without a script only ever touch
+        the names written in their own markup, and a deck with thousands of
+        media files should not ship all of them into every preview.
+        """
+        selected = media_by_name
+        if scope is not None:
+            selected = {
+                filename: stored_name
+                for filename, stored_name in media_by_name.items()
+                # Markup can spell a name plainly or percent-encoded.
+                if filename in scope or quote(filename) in scope or quote(filename, safe="") in scope
+            }
         urls = {
             filename: f"{media_base_url.rstrip('/')}/api/preview-media/{state.preview_token}/{quote(stored_name, safe='')}"
-            for filename, stored_name in media_by_name.items()
+            for filename, stored_name in selected.items()
         }
-        for filename in media_by_name:
+        for filename in selected:
             if filename.casefold().endswith(".css"):
                 urls[filename] = stylesheet_url(filename) or urls[filename]
         serialized = json.dumps(urls, ensure_ascii=False).replace("<", "\\u003c").replace(">", "\\u003e")
@@ -600,12 +640,14 @@ window.__ankiHelperResolveMediaUrl=resolve;
 }})();</script>"""
 
     try:
+        scope = None if SCRIPT_CONTENT.search(markup) else markup
         markup = _sound_marker.sub(replace_sound, markup)
+        markup = _tts_marker.sub(replace_tts, markup)
         markup = _preview_url_attribute.sub(replace_src, markup)
         markup = _srcset_attribute.sub(replace_srcset, markup)
         markup = _css_import.sub(replace_css_import, markup)
         markup = replace_script_strings(markup)
-        return runtime_resolver() + _css_url.sub(replace_css_url, markup)
+        return runtime_resolver(scope) + _css_url.sub(replace_css_url, markup)
     finally:
         if archive is not None:
             archive.close()
@@ -851,6 +893,36 @@ def rename_media_file(stored_name: str, payload: MediaRenameRequest) -> dict:
         "old_name": old_name,
         "new_name": item["name"],
     }
+
+
+@app.post("/api/media/delete")
+def delete_media_files(payload: MediaDeleteRequest) -> dict:
+    """Delete several media files after a single shared reference scan."""
+    state = _backend_state()
+    package = state.package
+    if package is None:
+        raise HTTPException(status_code=404, detail="먼저 APKG 파일을 열어주세요.")
+    if not payload.stored_names:
+        raise HTTPException(status_code=400, detail="삭제할 미디어 파일을 선택해주세요.")
+    names = {item["stored_name"]: item["name"] for item in media_items(package)}
+    unknown = [stored_name for stored_name in payload.stored_names if stored_name not in names]
+    if unknown:
+        raise HTTPException(status_code=404, detail="미디어 파일을 찾지 못했습니다.")
+    all_references = media_health(package)["references"]
+    references = {
+        stored_name: all_references.get(names[stored_name], [])
+        for stored_name in payload.stored_names
+    }
+    used = [stored_name for stored_name, entries in references.items() if entries]
+    if used and not payload.force:
+        preview = ", ".join(names[stored_name] for stored_name in used[:3])
+        extra = f" 외 {len(used) - 3}개" if len(used) > 3 else ""
+        raise HTTPException(status_code=409, detail=f"{preview}{extra}은(는) 카드·디자인에서 사용 중입니다. 강제로 삭제할 수 있습니다.")
+    try:
+        remove_media_files(package, list(payload.stored_names))
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"workspace": _workspace_data(state), "references": references}
 
 
 @app.delete("/api/media/{stored_name}")
@@ -1139,22 +1211,26 @@ def preview_card(
     template_index: int = 0,
     side: Literal["front", "back"] = "front",
     note_index: int = 0,
-) -> dict[str, str]:
+    cloze_ordinal: int = 0,
+) -> dict:
     note_type = _get_note_type(note_type_id)
     if not 0 <= template_index < len(note_type.templates):
         raise HTTPException(status_code=404, detail="카드 템플릿을 찾지 못했습니다.")
-    values = note_type.notes[note_index % len(note_type.notes)] if note_type.notes else [""] * len(note_type.fields)
+    resolved_index = note_index % len(note_type.notes) if note_type.notes else 0
+    values = note_type.notes[resolved_index] if note_type.notes else [""] * len(note_type.fields)
     template = note_type.templates[template_index]
-    special_values = {"Type": note_type.name, "Card": template.name}
-    front = render_template(template.front, note_type.fields, values, special_values=special_values)
-    body = front if side == "front" else render_template(
-        template.back,
-        note_type.fields,
-        values,
-        front,
-        is_answer=True,
+    ordinals = cloze_ordinals(template, note_type.fields, values)
+    active_ordinal = cloze_ordinal if cloze_ordinal in ordinals else (ordinals[0] if ordinals else 1)
+    special_values = _special_field_values(note_type, template, resolved_index)
+    render = partial(
+        render_template,
+        fields=note_type.fields,
+        values=values,
         special_values=special_values,
+        cloze_ordinal=active_ordinal,
     )
+    front = render(template.front)
+    body = front if side == "front" else render(template.back, front_html=front, is_answer=True)
     helper_css = (
         f"{_replay_button_css}"
         ".anki-audio:not(.replay-button){display:inline-grid;place-items:center;width:36px;height:36px;"
@@ -1168,7 +1244,33 @@ def preview_card(
             markup,
             str(request.base_url).rstrip("/"),
             _backend_state().package,
-        )
+        ),
+        "cloze_ordinals": ordinals,
+        "cloze_ordinal": active_ordinal if ordinals else 0,
+    }
+
+
+def _special_field_values(note_type: NoteType, template: Template, note_index: int) -> dict[str, str]:
+    """Fill Anki's special template fields for the previewed card.
+
+    Anki resolves these from the collection rather than from a note type, so
+    the deck name and tags come from the package.  The flag is always unset
+    because the Helper never assigns review flags.
+    """
+    package = _backend_state().package
+    deck = (package.deck_name if package else None) or "기본"
+    tags = ""
+    if package:
+        stored = package.note_tags.get(note_type.id, [])
+        if note_index < len(stored):
+            tags = stored[note_index]
+    return {
+        "Type": note_type.name,
+        "Card": template.name,
+        "Deck": deck,
+        "Subdeck": deck.split("::")[-1],
+        "Tags": html.escape(tags),
+        "CardFlag": "flag0",
     }
 
 

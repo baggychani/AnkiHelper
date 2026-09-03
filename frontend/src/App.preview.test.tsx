@@ -40,6 +40,8 @@ beforeEach(() => {
   vi.mocked(api.status).mockResolvedValue(workspace)
   vi.mocked(api.preview).mockImplementation(async (_noteTypeId, _templateIndex, side, noteIndex) => ({
     html: `<div data-preview="${side}-${noteIndex}">${side}-${noteIndex}</div>`,
+    cloze_ordinals: [],
+    cloze_ordinal: 0,
   }))
 })
 
@@ -70,13 +72,39 @@ describe('App preview navigation', () => {
     expect(calls.slice(-3)).toEqual(['back-0', 'front-1', 'back-1'])
   })
 
+  it('offers one preview card per cloze number in the note', async () => {
+    vi.mocked(api.preview).mockImplementation(async (_noteTypeId, _templateIndex, side, noteIndex, clozeOrdinal) => ({
+      html: `<div data-preview="c${clozeOrdinal || 1}-${side}-${noteIndex}">card</div>`,
+      cloze_ordinals: [1, 3],
+      cloze_ordinal: clozeOrdinal || 1,
+    }))
+
+    const user = userEvent.setup()
+    render(<App />)
+
+    await user.click(await screen.findByRole('button', { name: '실시간 미리보기' }))
+    await waitFor(() => expect(screen.getByTestId('preview-cloze-picker')).toBeTruthy())
+    expect(screen.getByRole('button', { name: 'c1' }).getAttribute('aria-pressed')).toBe('true')
+
+    await user.click(screen.getByRole('button', { name: 'c3' }))
+    await waitFor(() => expect(screen.getByTitle('카드 미리보기').getAttribute('srcdoc')).toContain('c3-front-0'))
+    expect(screen.getByRole('button', { name: 'c3' }).getAttribute('aria-pressed')).toBe('true')
+
+    // A different note has its own cloze numbers, so the picker starts over.
+    await user.click(screen.getByRole('button', { name: '다음' }))
+    await waitFor(() => {
+      const calls = vi.mocked(api.preview).mock.calls
+      expect(calls[calls.length - 1][4]).toBe(0)
+    })
+  })
+
   it('keeps the current card visible until the next document arrives', async () => {
-    let resolveNext: ((value: { html: string }) => void) | undefined
+    let resolveNext: ((value: { html: string; cloze_ordinals: number[]; cloze_ordinal: number }) => void) | undefined
     vi.mocked(api.preview).mockImplementation(async (_noteTypeId, _templateIndex, side, noteIndex) => {
       if (side === 'front' && noteIndex === 1) {
         return new Promise((resolve) => { resolveNext = resolve })
       }
-      return { html: `<div data-preview="${side}-${noteIndex}">${side}-${noteIndex}</div>` }
+      return { html: `<div data-preview="${side}-${noteIndex}">${side}-${noteIndex}</div>`, cloze_ordinals: [], cloze_ordinal: 0 }
     })
 
     const user = userEvent.setup()
@@ -93,7 +121,7 @@ describe('App preview navigation', () => {
     expect(screen.getByRole('button', { name: '다음' }).hasAttribute('disabled')).toBe(false)
 
     await waitFor(() => expect(resolveNext).toBeTypeOf('function'))
-    resolveNext?.({ html: '<div data-preview="front-1">front-1</div>' })
+    resolveNext?.({ html: '<div data-preview="front-1">front-1</div>', cloze_ordinals: [], cloze_ordinal: 0 })
     await waitFor(() => expect(screen.getByTitle('카드 미리보기').getAttribute('srcdoc')).toContain('front-1'))
   })
 

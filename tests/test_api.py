@@ -283,6 +283,37 @@ class BackendApiTests(unittest.TestCase):
             remaining = client.get("/api/media").json()
             self.assertEqual(["answer.mp3"], [item["name"] for item in remaining])
 
+    def test_media_bulk_delete_scans_deck_references_once(self) -> None:
+        assets = []
+        for index in range(4):
+            asset = self.root / f"badge{index}.svg"
+            asset.write_text('<svg xmlns="http://www.w3.org/2000/svg"/>', encoding="utf-8")
+            assets.append(str(asset))
+
+        with TestClient(backend.app) as client:
+            _workspace, note_type_id = self._open_workspace(client)
+            self.assertEqual(200, client.post("/api/media/import", json={"paths": assets}).status_code)
+            client.patch(f"/api/note-types/{note_type_id}/templates/0", json={"front": '<img src="badge0.svg">'})
+            stored_names = [item["stored_name"] for item in client.get("/api/media").json() if item["name"] != "answer.mp3"]
+
+            blocked = client.post("/api/media/delete", json={"stored_names": stored_names})
+            self.assertEqual(409, blocked.status_code, blocked.text)
+            self.assertIn("badge0.svg", blocked.json()["detail"])
+
+            real_health = backend.media_health
+            calls = []
+
+            def counted(package):
+                calls.append(package)
+                return real_health(package)
+
+            with patch("anki_helper.backend.media_health", counted):
+                forced = client.post("/api/media/delete", json={"stored_names": stored_names, "force": True})
+
+            self.assertEqual(200, forced.status_code, forced.text)
+            self.assertEqual(1, len(calls))
+            self.assertEqual(["answer.mp3"], [item["name"] for item in client.get("/api/media").json()])
+
     def test_media_export_respects_type_filter(self) -> None:
         asset = self.root / "badge.svg"
         asset.write_text('<svg xmlns="http://www.w3.org/2000/svg"/>', encoding="utf-8")
@@ -431,6 +462,65 @@ class BackendApiTests(unittest.TestCase):
             font_url = re.compile(rf"/api/preview-media/[^/]+/{re.escape(font_item['stored_name'])}")
             self.assertNotIn('url("_KNMaiyuan-Regular.ttf")', preview)
             self.assertGreaterEqual(len(font_url.findall(preview)), 1)
+
+    def test_preview_fills_ankis_special_template_fields(self) -> None:
+        with TestClient(backend.app) as client:
+            _workspace, note_type_id = self._open_workspace(client)
+            client.patch(
+                f"/api/note-types/{note_type_id}/templates/0",
+                json={"front": "{{Deck}} | {{Subdeck}} | {{Type}} | {{Card}} | {{CardFlag}} | {{Tags}}"},
+            )
+            preview = client.get(f"/api/note-types/{note_type_id}/preview").json()["html"]
+
+            self.assertIn("API test | API test | Basic | Card 1 | flag0 |", preview)
+
+    def test_preview_selects_a_cloze_card_by_number(self) -> None:
+        with TestClient(backend.app) as client:
+            _workspace, note_type_id = self._open_workspace(client)
+            client.patch(f"/api/note-types/{note_type_id}/templates/0", json={"front": "{{cloze:Front}}"})
+            client.patch(
+                f"/api/note-types/{note_type_id}/notes/0/fields/0",
+                json={"value": "{{c1::Ankara}} is in {{c3::Turkey}}"},
+            )
+
+            first = client.get(f"/api/note-types/{note_type_id}/preview").json()
+            third = client.get(f"/api/note-types/{note_type_id}/preview", params={"cloze_ordinal": 3}).json()
+
+            self.assertEqual([1, 3], first["cloze_ordinals"])
+            self.assertEqual(1, first["cloze_ordinal"])
+            self.assertIn('<span class="cloze" data-ordinal="1">[...]</span>', first["html"])
+            self.assertEqual(3, third["cloze_ordinal"])
+            self.assertIn('<span class="cloze-inactive" data-ordinal="1">Ankara</span>', third["html"])
+            self.assertIn('<span class="cloze" data-ordinal="3">[...]</span>', third["html"])
+
+    def test_preview_keeps_the_place_of_an_unplayable_tts_control(self) -> None:
+        with TestClient(backend.app) as client:
+            _workspace, note_type_id = self._open_workspace(client)
+            client.patch(
+                f"/api/note-types/{note_type_id}/templates/0",
+                json={"front": "{{tts en_US voices=Bob:Front}}"},
+            )
+            preview = client.get(f"/api/note-types/{note_type_id}/preview").json()["html"]
+
+            self.assertIn("class='replay-button soundLink anki-tts' disabled", preview)
+            self.assertIn("aria-label='TTS 자리: question'", preview)
+            self.assertIn(".replay-button:disabled{opacity:.5", preview)
+
+    def test_preview_only_ships_media_a_scriptless_card_can_reach(self) -> None:
+        unrelated = self.root / "unrelated.png"
+        unrelated.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+        with TestClient(backend.app) as client:
+            _workspace, note_type_id = self._open_workspace(client)
+            client.post("/api/media/import", json={"paths": [str(unrelated)]})
+
+            quiet = client.get(f"/api/note-types/{note_type_id}/preview", params={"side": "back"}).json()["html"]
+            self.assertNotIn('"unrelated.png":', quiet)
+            self.assertIn('"answer.mp3":', quiet)
+
+            client.patch(f"/api/note-types/{note_type_id}/templates/0", json={"front": "<script>run()</script>"})
+            scripted = client.get(f"/api/note-types/{note_type_id}/preview").json()["html"]
+            self.assertIn('"unrelated.png":', scripted)
 
     def test_preview_uses_anki_compatible_replay_button(self) -> None:
         with TestClient(backend.app) as client:

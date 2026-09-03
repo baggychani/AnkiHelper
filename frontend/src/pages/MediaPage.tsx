@@ -276,17 +276,12 @@ export function MediaPage({ onExport, onExportSelected, notify }: {
         : ''
       if (!window.confirm(`선택한 ${targets.length}개 파일을 제거할까요? 저장하면 APKG에서도 삭제됩니다.${summary}`)) return
       setBulkBusy(true)
-      let lastWorkspace: Awaited<ReturnType<typeof api.deleteMedia>>['workspace'] | undefined
-      for (const item of targets) {
-        const references = report.references[item.name] ?? []
-        const result = await api.deleteMedia(item.stored_name, references.length > 0)
-        lastWorkspace = result.workspace
-      }
+      const result = await api.deleteMediaFiles(targets.map((item) => item.stored_name), referenced.length > 0)
       playbackRequestRef.current += 1; disposeAudio(); setPlaying('')
       setItems((current) => current.filter((entry) => !checked.has(entry.stored_name)))
       setChecked(new Set())
       setHealth(null)
-      if (lastWorkspace) window.dispatchEvent(new CustomEvent('ankihelper:media-changed', { detail: { workspace: lastWorkspace } }))
+      window.dispatchEvent(new CustomEvent('ankihelper:media-changed', { detail: { workspace: result.workspace } }))
       notify(`${targets.length}개 파일을 제거했습니다.`)
     } catch (caught) { setError(caught instanceof Error ? caught.message : '미디어를 제거하지 못했습니다.') }
     finally { setBulkBusy(false) }
@@ -326,7 +321,7 @@ export function MediaPage({ onExport, onExportSelected, notify }: {
     </div>
     <section className="flex min-h-0 flex-1 flex-col rounded-[18px] border border-slate-200/70 bg-white p-4 shadow-card lg:rounded-[22px] lg:p-5">
       <div className="mb-4 flex shrink-0 flex-wrap items-center justify-between gap-3">
-        <div><h3 className="text-lg font-semibold">미디어 관리</h3><p className="mt-1 text-xs text-slate-400">Anki는 템플릿 폰트·디자인 파일을 <code>_이름</code>으로 넣고 CSS/HTML도 그 이름을 그대로 씁니다. 디자인용 추가와 폰트는 앞에 <code>_</code>를 붙입니다. CSS 복사 버튼이 그 이름을 넣습니다.</p></div>
+        <div><h3 className="text-lg font-semibold">미디어 관리</h3><p className="mt-1 text-xs text-slate-400">Anki는 템플릿 폰트·디자인 파일을 <code>_이름</code>으로 넣고 CSS/HTML도 그 이름을 그대로 씁니다. 디자인용 추가와 폰트는 앞에 <code>_</code>를 붙이되, 이미 CSS·템플릿이 쓰고 있는 이름은 그대로 둡니다. CSS 복사 버튼이 그 이름을 넣습니다.</p></div>
         <div className="flex flex-wrap gap-2"><button onClick={() => void addFiles(false)} className="inline-flex h-10 items-center gap-2 rounded-xl border border-slate-200 px-3 text-xs font-semibold text-slate-700 hover:bg-slate-50"><Plus size={15} />파일 추가</button><button onClick={() => void addFiles(true)} className="inline-flex h-10 items-center gap-2 rounded-xl border border-slate-200 px-3 text-xs font-semibold text-slate-700 hover:bg-slate-50"><Palette size={15} />디자인용 추가</button></div>
       </div>
       <div className="mb-3 flex shrink-0 gap-2"><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="파일명 검색" className="min-w-0 flex-1 rounded-xl border border-slate-200 px-3 py-2.5 text-sm outline-none" /><button onClick={() => void inspect()} className="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3 text-xs font-semibold text-slate-700 hover:bg-slate-50"><ScanSearch size={15} />미디어 검사</button><button onClick={() => onExport(filter === 'all' ? undefined : filter)} className="inline-flex items-center gap-2 rounded-xl bg-[#151d31] px-4 text-sm font-semibold text-white"><Download size={15} />{exportLabel}</button></div>

@@ -16,6 +16,8 @@ from anki_helper.anki_package import (
     _encode_modern_media_index,
     _protobuf_parts,
     _read_legacy_collection,
+    Template,
+    cloze_ordinals,
     create_package_from_table,
     decode_media_payload,
     export_bundle,
@@ -114,6 +116,16 @@ class MediaWorkflowTests(unittest.TestCase):
         already_prefixed.write_bytes(b"wOF2")
         second = import_media(self.package, [already_prefixed])
         self.assertEqual("_Existing.woff2", second[0]["name"])
+
+    def test_font_import_keeps_a_name_the_design_already_references(self) -> None:
+        font = self.root / "KNMaiyuan-Regular.ttf"
+        font.write_bytes(b"OTTO")
+        self.package.note_types[0].css = '@font-face{font-family:"KN";src:url("KNMaiyuan-Regular.ttf")}'
+
+        added = import_media(self.package, [font])
+
+        self.assertEqual("KNMaiyuan-Regular.ttf", added[0]["name"])
+        self.assertEqual([], media_health(self.package)["missing"])
 
     def test_exports_reject_unsafe_media_names_before_creating_archives(self) -> None:
         added = import_media(self.package, [self.asset])
@@ -263,6 +275,17 @@ class MediaWorkflowTests(unittest.TestCase):
         finally:
             created.source.unlink(missing_ok=True)
 
+    def test_table_import_stores_multiline_cells_as_anki_line_breaks(self) -> None:
+        created = create_package_from_table(
+            ["Front", "Back"], [["첫 줄\r\n둘째 줄", "answer\n둘째"]],
+            deck_name="New deck", note_type_name="Basic", front_field=0, back_field=1,
+        )
+        try:
+            self.assertEqual(["첫 줄<br>둘째 줄", "answer<br>둘째"], created.note_types[0].notes[0])
+            self.assertEqual("New deck", created.deck_name)
+        finally:
+            created.source.unlink(missing_ok=True)
+
     def test_template_sections_do_not_duplicate_sound_fields(self) -> None:
         markup = render_template(
             "{{#Back}}<div class='answer-sound'>{{Back}}</div>{{/Back}}",
@@ -310,8 +333,35 @@ class MediaWorkflowTests(unittest.TestCase):
         question = render_template("{{cloze:Front}}", fields, values)
         answer = render_template("{{cloze:Front}}", fields, values, is_answer=True)
 
-        self.assertEqual('<span class="cloze">[city]</span> and Ankara', question)
-        self.assertEqual('<span class="cloze">Istanbul</span> and Ankara', answer)
+        self.assertEqual(
+            '<span class="cloze" data-ordinal="1">[city]</span>'
+            ' and <span class="cloze-inactive" data-ordinal="2">Ankara</span>',
+            question,
+        )
+        self.assertEqual(
+            '<span class="cloze" data-ordinal="1">Istanbul</span>'
+            ' and <span class="cloze-inactive" data-ordinal="2">Ankara</span>',
+            answer,
+        )
+
+    def test_preview_renders_the_selected_cloze_card(self) -> None:
+        note_type = self.package.note_types[0]
+        template = Template(name="Cloze", front="{{cloze:Front}}", back="{{cloze:Front}}")
+        values = ["{{c1::Istanbul::city}} and {{c3::Ankara}}", ""]
+
+        self.assertEqual([1, 3], cloze_ordinals(template, note_type.fields, values))
+        third = render_template(template.front, note_type.fields, values, cloze_ordinal=3)
+        self.assertEqual(
+            '<span class="cloze-inactive" data-ordinal="1">Istanbul</span>'
+            ' and <span class="cloze" data-ordinal="3">[...]</span>',
+            third,
+        )
+
+    def test_cloze_ordinals_ignores_fields_without_the_cloze_filter(self) -> None:
+        note_type = self.package.note_types[0]
+        plain = Template(name="Card 1", front="{{Front}}", back="{{Back}}")
+
+        self.assertEqual([], cloze_ordinals(plain, note_type.fields, ["{{c1::Istanbul}}", ""]))
 
     def test_media_health_resolves_url_encoded_references_and_reports_missing(self) -> None:
         special = self.root / "badge 100%.svg"

@@ -20,7 +20,7 @@ function frameSize(platform: PreviewPlatform) {
   }
 }
 
-export function PreviewPage({ noteType, templateIndex, previewState, previewKey, previewHtml, onSide, onNavigate }: {
+export function PreviewPage({ noteType, templateIndex, previewState, previewKey, previewHtml, onSide, onNavigate, clozeCards, onCloze }: {
   noteType?: NoteType
   templateIndex: number
   previewState: typeof initialPreviewState
@@ -28,6 +28,8 @@ export function PreviewPage({ noteType, templateIndex, previewState, previewKey,
   previewHtml: string | null
   onSide: (side: PreviewSide) => void
   onNavigate: (delta: -1 | 1) => void
+  clozeCards: { ordinals: number[]; active: number }
+  onCloze: (ordinal: number) => void
 }) {
   const [platform, setPlatform] = useState<PreviewPlatform>('desktop')
   const [nightMode, setNightMode] = useState(false)
@@ -114,6 +116,18 @@ export function PreviewPage({ noteType, templateIndex, previewState, previewKey,
     <aside className="flex min-h-[170px] flex-col rounded-[18px] border border-slate-200/70 bg-white p-4 shadow-card lg:rounded-[22px] lg:p-5">
       <h2 className="text-lg font-semibold">실시간 미리보기</h2>
       <div className="mt-4 grid grid-cols-2 rounded-xl bg-slate-100 p-1 lg:mt-6"><button disabled={doc === null} onClick={() => onSide('front')} className={`rounded-lg py-2 text-xs font-semibold disabled:cursor-wait disabled:opacity-50 ${side === 'front' ? 'bg-white shadow-sm' : 'text-slate-400'}`}>앞면</button><button disabled={doc === null} onClick={() => onSide('back')} className={`rounded-lg py-2 text-xs font-semibold disabled:cursor-wait disabled:opacity-50 ${side === 'back' ? 'bg-white shadow-sm' : 'text-slate-400'}`}>뒷면</button></div>
+      {clozeCards.ordinals.length > 1 && <div className="mt-5" data-testid="preview-cloze-picker">
+        <p className="mb-2 text-[11px] font-semibold text-slate-400">빈칸 카드</p>
+        <div className="flex flex-wrap gap-1.5">
+          {clozeCards.ordinals.map((ordinal) => <button
+            key={ordinal}
+            type="button"
+            aria-pressed={ordinal === clozeCards.active}
+            onClick={() => onCloze(ordinal)}
+            className={`min-w-[38px] rounded-lg border px-2 py-1.5 text-[11px] font-semibold transition ${ordinal === clozeCards.active ? 'border-indigo-600 bg-indigo-600 text-white' : 'border-slate-200 text-slate-500 hover:bg-slate-50'}`}
+          >c{ordinal}</button>)}
+        </div>
+      </div>}
       <div className="mt-5">
         <p className="mb-2 text-[11px] font-semibold text-slate-400">표시 환경</p>
         <div className="grid grid-cols-2 rounded-xl bg-slate-100 p-1">

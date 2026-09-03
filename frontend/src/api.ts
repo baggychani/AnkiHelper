@@ -147,10 +147,13 @@ export const api = {
   importMedia: (paths: string[], templateAsset = false) => request<{ workspace: Workspace; items: MediaItem[] }>('/api/media/import', { method: 'POST', body: JSON.stringify({ paths, template_asset: templateAsset }) }),
   renameMedia: (storedName: string, name: string) => request<{ workspace: Workspace; item: MediaItem; old_name: string; new_name: string }>(`/api/media/${encodeURIComponent(storedName)}`, { method: 'PATCH', body: JSON.stringify({ name }) }),
   deleteMedia: (storedName: string, force = false) => request<{ workspace: Workspace }>(`/api/media/${encodeURIComponent(storedName)}?force=${force}`, { method: 'DELETE' }),
+  // One request for many files: the engine scans the deck for references once
+  // instead of once per file.
+  deleteMediaFiles: (storedNames: string[], force = false) => request<{ workspace: Workspace }>('/api/media/delete', { method: 'POST', body: JSON.stringify({ stored_names: storedNames, force }) }),
   mediaUrl: (storedName: string) => `${base}/api/media/${encodeURIComponent(storedName)}`,
   importProject: (path: string) => request<{ workspace: Workspace; note_type_id: string }>('/api/projects/import', { method: 'POST', body: JSON.stringify({ path }) }),
-  preview: (noteTypeId: string, templateIndex: number, side: 'front' | 'back', noteIndex: number, signal?: AbortSignal) =>
-    request<{ html: string }>(`/api/note-types/${noteTypeId}/preview?template_index=${templateIndex}&side=${side}&note_index=${noteIndex}`, { signal }),
+  preview: (noteTypeId: string, templateIndex: number, side: 'front' | 'back', noteIndex: number, clozeOrdinal = 0, signal?: AbortSignal) =>
+    request<{ html: string; cloze_ordinals: number[]; cloze_ordinal: number }>(`/api/note-types/${noteTypeId}/preview?template_index=${templateIndex}&side=${side}&note_index=${noteIndex}&cloze_ordinal=${clozeOrdinal}`, { signal }),
   exportUrl: (kind: 'tsv' | 'design' | 'bundle' | 'media' | 'project', noteTypeId: string, mediaType?: MediaKind, storedNames?: string[]) => {
     const params = new URLSearchParams()
     if (kind === 'media' && mediaType) params.set('media_type', mediaType)

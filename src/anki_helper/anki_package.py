@@ -94,6 +94,10 @@ class DeckPackage:
     display_name: str | None = None
     pending_media: dict[str, Path] = dataclass_field(default_factory=dict)
     removed_media: set[str] = dataclass_field(default_factory=set)
+    # Anki's {{Tags}} and {{Deck}} come from the notes/cards tables rather than
+    # from a note type, so the preview keeps them beside the parsed note types.
+    note_tags: dict[str, list[str]] = dataclass_field(default_factory=dict)
+    deck_name: str | None = None
 
 
 class ApkgReadError(RuntimeError):
@@ -216,6 +220,15 @@ def _read_media_map(archive: zipfile.ZipFile, entries: set[str]) -> dict[str, st
         return {}
 
 
+def _read_note_rows(connection: sqlite3.Connection) -> list[tuple[int, int, str, str]]:
+    """Read notes with their tags, tolerating collections without that column."""
+    try:
+        rows = connection.execute("SELECT id, mid, flds, tags FROM notes ORDER BY id").fetchall()
+    except sqlite3.OperationalError:
+        rows = [(*row, "") for row in connection.execute("SELECT id, mid, flds FROM notes ORDER BY id")]
+    return [(int(note_id), int(type_id), str(fields), str(tags or "")) for note_id, type_id, fields, tags in rows]
+
+
 def _read_legacy_collection(
     source: Path, database_path: Path, media: dict[str, str], entries: set[str], database_name: str
 ) -> DeckPackage:
@@ -228,15 +241,18 @@ def _read_legacy_collection(
         if not models_json[0]:
             return _read_normalized_collection(source, connection, media, entries, database_name)
         models: dict[str, Any] = json.loads(models_json[0])
-        rows = connection.execute("SELECT id, mid, flds FROM notes ORDER BY id").fetchall()
+        rows = _read_note_rows(connection)
+        deck_name = _read_legacy_deck_name(connection)
     finally:
         connection.close()
 
     notes_by_model: dict[str, list[list[str]]] = {}
     note_ids: dict[str, list[int]] = {}
-    for note_id, model_id, fields in rows:
+    note_tags: dict[str, list[str]] = {}
+    for note_id, model_id, fields, tags in rows:
         notes_by_model.setdefault(str(model_id), []).append(str(fields).split("\x1f"))
         note_ids.setdefault(str(model_id), []).append(int(note_id))
+        note_tags.setdefault(str(model_id), []).append(str(tags or "").strip())
 
     note_types: list[NoteType] = []
     for model_id, model in models.items():
@@ -255,7 +271,7 @@ def _read_legacy_collection(
                 notes=notes_by_model.get(str(model_id), []),
             )
         )
-    return DeckPackage(source=source, note_types=note_types, media=media, archive_entries=entries, database_name=database_name, note_ids=note_ids)
+    return DeckPackage(source=source, note_types=note_types, media=media, archive_entries=entries, database_name=database_name, note_ids=note_ids, note_tags=note_tags, deck_name=deck_name)
 
 
 def _read_normalized_collection(
@@ -280,9 +296,11 @@ def _read_normalized_collection(
 
     notes_by_type: dict[int, list[list[str]]] = {}
     note_ids: dict[str, list[int]] = {}
-    for note_id, type_id, fields in connection.execute("SELECT id, mid, flds FROM notes ORDER BY id"):
+    note_tags: dict[str, list[str]] = {}
+    for note_id, type_id, fields, tags in _read_note_rows(connection):
         notes_by_type.setdefault(type_id, []).append(str(fields).split("\x1f"))
         note_ids.setdefault(str(type_id), []).append(int(note_id))
+        note_tags.setdefault(str(type_id), []).append(str(tags or "").strip())
 
     note_types: list[NoteType] = []
     for type_id, name, config in note_type_rows:
@@ -297,7 +315,45 @@ def _read_normalized_collection(
                 notes=notes_by_type.get(type_id, []),
             )
         )
-    return DeckPackage(source=source, note_types=note_types, media=media, archive_entries=entries, database_name=database_name, note_ids=note_ids)
+    return DeckPackage(source=source, note_types=note_types, media=media, archive_entries=entries, database_name=database_name, note_ids=note_ids, note_tags=note_tags, deck_name=_read_normalized_deck_name(connection))
+
+
+def _dominant_deck_name(names: dict[int, str], counts: list[tuple[int, int]]) -> str | None:
+    """Return the deck holding the most cards, which {{Deck}} previews use.
+
+    A package can span sub-decks, and Anki resolves {{Deck}} per card.  The
+    Helper has no scheduling state to pick a card from, so the deck that owns
+    most of the package is the closest honest stand-in.
+    """
+    ranked = sorted(((count, deck_id) for deck_id, count in counts if deck_id in names), reverse=True)
+    if ranked:
+        return names[ranked[0][1]]
+    return next(iter(sorted(names.items())), (0, None))[1]
+
+
+def _read_legacy_deck_name(connection: sqlite3.Connection) -> str | None:
+    try:
+        row = connection.execute("SELECT decks FROM col").fetchone()
+        decks: dict[str, Any] = json.loads(row[0]) if row and row[0] else {}
+        names = {int(deck_id): str(deck.get("name", "")) for deck_id, deck in decks.items() if deck.get("name")}
+        counts = connection.execute("SELECT did, count(*) FROM cards GROUP BY did").fetchall()
+    except (sqlite3.DatabaseError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+    return _dominant_deck_name(names, [(int(deck_id), int(count)) for deck_id, count in counts])
+
+
+def _read_normalized_deck_name(connection: sqlite3.Connection) -> str | None:
+    try:
+        # The normalized schema separates deck components with 0x1f, not "::".
+        names = {
+            int(deck_id): str(name).replace("\x1f", "::")
+            for deck_id, name in connection.execute("SELECT id, name FROM decks")
+            if name
+        }
+        counts = connection.execute("SELECT did, count(*) FROM cards GROUP BY did").fetchall()
+    except (sqlite3.DatabaseError, TypeError, ValueError):
+        return None
+    return _dominant_deck_name(names, [(int(deck_id), int(count)) for deck_id, count in counts])
 
 
 def _protobuf_parts(blob: bytes) -> dict[int, list[bytes]]:
@@ -1012,10 +1068,13 @@ def create_package_from_table(
         raise ValueError("카드 앞면과 뒷면에 사용할 필드를 선택해 주세요.")
     deck_name = deck_name.strip() or "새 덱"
     note_type_name = note_type_name.strip() or "기본"
-    values = [
-        [str(row[index]).strip() if index < len(row) else "" for index in range(len(clean_fields))]
-        for row in rows
-    ]
+    def cell_html(row: list[str], index: int) -> str:
+        # Anki's CSV/TSV importer stores a multi-line cell as <br>, because a
+        # bare newline is only whitespace once the reviewer renders the field.
+        text = str(row[index]).strip() if index < len(row) else ""
+        return re.sub(r"\r\n?|\n", "<br>", text)
+
+    values = [[cell_html(row, index) for index in range(len(clean_fields))] for row in rows]
     values = [row for row in values if any(cell for cell in row)]
     if not values:
         raise ValueError("비어 있지 않은 데이터 행이 하나 이상 필요합니다.")
@@ -1159,6 +1218,31 @@ CREATE INDEX ix_revlog_cid ON revlog (cid);
 """
 
 
+CLOZE_DELETION = re.compile(r"{{c(?P<ordinal>\d+)::", re.IGNORECASE)
+
+
+def cloze_ordinals(template: Template, fields: list[Field], values: list[str]) -> list[int]:
+    """Return the cloze numbers that generate cards for a single note.
+
+    A cloze note type has one template but one card per ``{{cN::}}`` number
+    found in the fields that template wraps with the ``cloze:`` filter, so the
+    preview needs this list to offer more cards than there are templates.
+    """
+    names: set[str] = set()
+    for token in FIELD_TOKEN.findall(f"{template.front}\n{template.back}"):
+        parts = [part.strip() for part in str(token).split(":")]
+        if any(part.split(maxsplit=1)[0].casefold() == "cloze" for part in parts[:-1] if part):
+            names.add(parts[-1])
+    orders = {field.name: field.order for field in fields}
+    ordinals: set[int] = set()
+    for name in names:
+        order = orders.get(name)
+        if order is None or order >= len(values):
+            continue
+        ordinals.update(int(match.group("ordinal")) for match in CLOZE_DELETION.finditer(values[order]))
+    return sorted(ordinal for ordinal in ordinals if ordinal > 0)
+
+
 def render_template(
     template: str,
     fields: list[Field],
@@ -1167,12 +1251,12 @@ def render_template(
     *,
     is_answer: bool = False,
     special_values: dict[str, str] | None = None,
+    cloze_ordinal: int = 1,
 ) -> str:
     """Render common Anki field syntax closely enough for a faithful preview.
 
     Unknown filters deliberately fall back to the underlying field instead of
-    hiding it.  Client-specific features such as TTS can then remain visible in
-    the Helper even when the desktop WebView cannot emulate the native player.
+    hiding it, so client-specific template features stay visible in the Helper.
     """
     field_values = {
         field.name: values[field.order] if field.order < len(values) else ""
@@ -1181,18 +1265,19 @@ def render_template(
     special_values = special_values or {}
 
     def plain_text(value: str) -> str:
-        text = re.sub(r"<br\s*/?>", "\n", value, flags=re.IGNORECASE)
-        text = re.sub(r"<[^>]+>", "", text)
-        return html.escape(html.unescape(text)).replace("\n", "<br>")
+        # Anki's `text:` filter strips tags and decodes entities; it does not
+        # turn <br> back into a line break.
+        return html.escape(html.unescape(re.sub(r"<[^>]+>", "", value)))
 
     def cloze_text(value: str) -> str:
         def replace_cloze(match: re.Match[str]) -> str:
             ordinal = int(match.group("ordinal"))
             content = match.group("content")
             hint = match.group("hint") or "..."
-            if is_answer:
-                return f'<span class="cloze">{content}</span>' if ordinal == 1 else content
-            return f'<span class="cloze">[{hint}]</span>' if ordinal == 1 else content
+            if ordinal != cloze_ordinal:
+                return f'<span class="cloze-inactive" data-ordinal="{ordinal}">{content}</span>'
+            revealed = content if is_answer else f"[{hint}]"
+            return f'<span class="cloze" data-ordinal="{ordinal}">{revealed}</span>'
 
         return re.sub(
             r"{{c(?P<ordinal>\d+)::(?P<content>.*?)(?:::(?P<hint>.*?))?}}",
@@ -1232,6 +1317,11 @@ def render_template(
                 if is_answer
                 else '<input id="typeans" type="text" autocomplete="off" aria-label="정답 입력">'
             )
+        if name == "tts":
+            # Anki turns {{tts}} into a replay control. The preview keeps that
+            # control's place in the layout; the API marks it as unplayable.
+            spoken = html.escape(re.sub(r"<[^>]+>", "", value).strip(), quote=True)
+            return f'<span class="tts" data-tts="{spoken}"></span>'
         return value
 
     def replace(match: re.Match[str]) -> str:
@@ -1249,11 +1339,13 @@ def render_template(
         value = field_values.get(name, special_values.get(name, ""))
         for filter_name in reversed(filters):
             value = apply_filter(filter_name, value)
-        # Preserve stored HTML but make plain TSV text readable in preview.
-        return value.replace("\n", "<br>")
+        # Anki inserts stored field HTML verbatim; a bare newline stays
+        # whitespace exactly as the reviewer renders it.
+        return value
 
     def replace_conditional(match: re.Match[str]) -> str:
-        has_value = bool(field_values.get(match.group("name").strip(), "").strip())
+        name = match.group("name").strip()
+        has_value = bool(field_values.get(name, special_values.get(name, "")).strip())
         return match.group("body") if has_value == (match.group("kind") == "#") else ""
 
     # Anki processes sections before ordinary field replacement.  Treating an
@@ -1416,10 +1508,31 @@ def _next_media_stored_name(package: DeckPackage) -> str:
     return str(max(numeric_names, default=-1) + 1)
 
 
+def _design_reference_names(package: DeckPackage) -> set[str]:
+    """Return filenames already referenced by note type CSS and templates.
+
+    Only styling and templates are scanned: fonts and other design assets are
+    never field media, and skipping notes keeps media import cheap on decks
+    with tens of thousands of rows.
+    """
+    names: set[str] = set()
+    for note_type in package.note_types:
+        markups = [note_type.css]
+        for template in note_type.templates:
+            markups.extend((template.front, template.back))
+        for markup in markups:
+            for raw, _dynamic in _markup_media_values(markup):
+                filename = media_reference_filename(raw)
+                if filename:
+                    names.add(filename)
+    return names
+
+
 def import_media(package: DeckPackage, paths: list[str | Path], *, template_asset: bool = False) -> list[dict[str, Any]]:
     """Stage local files so the next APKG save embeds them as Anki media."""
     staged: list[tuple[str, str, Path]] = []
     used_names = set(package.media.values())
+    design_references = _design_reference_names(package)
     next_stored_name = int(_next_media_stored_name(package))
     try:
         for raw_path in paths:
@@ -1427,10 +1540,11 @@ def import_media(package: DeckPackage, paths: list[str | Path], *, template_asse
             if not source.is_file():
                 raise ValueError(f"미디어 파일을 찾을 수 없습니다: {source.name or source}")
             name = _safe_media_name(source.name)
-            # Anki's font install guide names template fonts `_arial.ttf` and
-            # requires CSS `url()` to use that same name. Fonts are not field
-            # media, so regular add follows the same rule as 디자인용 추가.
-            if template_asset or _media_type(name) == "font":
+            # Anki's font install guide names template fonts `_arial.ttf` so
+            # `Check Media` keeps them and exports include them. An existing
+            # CSS `url()` must keep resolving, so a name the design already
+            # references is left exactly as it is.
+            if template_asset or (_media_type(name) == "font" and name not in design_references):
                 name = "_" + name.lstrip("_")
             name = _unique_media_name(name, used_names)
             used_names.add(name)
@@ -1463,6 +1577,20 @@ def remove_media(package: DeckPackage, stored_name: str) -> None:
     elif stored_name in package.archive_entries:
         package.removed_media.add(stored_name)
     del package.media[stored_name]
+
+
+def remove_media_files(package: DeckPackage, stored_names: list[str]) -> list[str]:
+    """Remove several media entries after one shared reference scan.
+
+    Deleting one file at a time re-reads the whole deck to answer "is it still
+    used?", which turns a multi-file delete into a quadratic operation.
+    """
+    unknown = [name for name in stored_names if name not in package.media]
+    if unknown:
+        raise ValueError("미디어 파일을 찾을 수 없습니다.")
+    for stored_name in stored_names:
+        remove_media(package, stored_name)
+    return stored_names
 
 
 def _rewrite_media_ref_value(value: str, old_name: str, new_name: str) -> str:
