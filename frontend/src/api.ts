@@ -74,6 +74,7 @@ export const api = {
     templateSourcePath?: string
     templateNoteTypeId?: string
     fieldMapping?: Record<number, number>
+    includedColumns?: number[]
   }) => request<Workspace>('/api/tables/create', {
     method: 'POST',
     body: JSON.stringify({
@@ -88,6 +89,7 @@ export const api = {
       template_source_path: payload.templateSourcePath ?? null,
       template_note_type_id: payload.templateNoteTypeId ?? null,
       field_mapping: payload.fieldMapping ? Object.fromEntries(Object.entries(payload.fieldMapping).map(([source, destination]) => [String(source), destination])) : null,
+      included_columns: payload.includedColumns ?? null,
     }),
   }),
   updateTemplate: (noteTypeId: string, index: number, patch: Partial<Template>) =>

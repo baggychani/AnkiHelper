@@ -307,6 +307,7 @@ class TableCreateRequest(BaseModel):
     template_source_path: str | None = None
     template_note_type_id: str | None = None
     field_mapping: dict[str, int] | None = None
+    included_columns: list[int] | None = None
 
 
 class NoteTypeSourceRequest(BaseModel):
@@ -747,6 +748,9 @@ def create_from_table(payload: TableCreateRequest) -> dict:
                 template_package=template_package,
             )
         else:
+            if payload.included_columns is not None:
+                selected_columns = payload.included_columns
+                rows = [[row[column] if 0 <= column < len(row) else "" for column in selected_columns] for row in rows]
             package = create_package_from_table(
                 payload.field_names,
                 rows,

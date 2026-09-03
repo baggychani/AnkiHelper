@@ -103,6 +103,18 @@ class MediaWorkflowTests(unittest.TestCase):
         with zipfile.ZipFile(archive_path) as archive:
             self.assertEqual(["media/answer.oga"], archive.namelist())
 
+    def test_fonts_are_prefixed_even_without_template_asset(self) -> None:
+        font = self.root / "KNMaiyuan-Regular.ttf"
+        font.write_bytes(b"OTTO")
+        added = import_media(self.package, [font])
+        self.assertEqual("_KNMaiyuan-Regular.ttf", added[0]["name"])
+        self.assertEqual("font", added[0]["type"])
+
+        already_prefixed = self.root / "_Existing.woff2"
+        already_prefixed.write_bytes(b"wOF2")
+        second = import_media(self.package, [already_prefixed])
+        self.assertEqual("_Existing.woff2", second[0]["name"])
+
     def test_exports_reject_unsafe_media_names_before_creating_archives(self) -> None:
         added = import_media(self.package, [self.asset])
         self.package.media[added[0]["stored_name"]] = "../escaped.svg"

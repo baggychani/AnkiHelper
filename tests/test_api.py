@@ -225,6 +225,41 @@ class BackendApiTests(unittest.TestCase):
             self.assertEqual("Imported", workspace["note_types"][0]["name"])
             self.assertEqual([["hello", "world"]], workspace["note_types"][0]["notes"])
 
+    def test_create_from_table_skips_excluded_columns(self) -> None:
+        openpyxl = find_spec("openpyxl")
+        self.assertIsNotNone(openpyxl, "openpyxl is required for XLSX import tests")
+        from openpyxl import Workbook
+
+        xlsx_path = self.root / "cards_with_notes.xlsx"
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "Cards"
+        sheet.append(["Front", "Internal Note", "Back"])
+        sheet.append(["hello", "skip me", "world"])
+        workbook.save(xlsx_path)
+        workbook.close()
+
+        with TestClient(backend.app) as client:
+            created = client.post(
+                "/api/tables/create",
+                json={
+                    "path": str(xlsx_path),
+                    "sheet_name": "Cards",
+                    "first_row_is_header": True,
+                    "field_names": ["Front", "Back"],
+                    "deck_name": "Imported deck",
+                    "note_type_name": "Imported",
+                    "front_field": 0,
+                    "back_field": 1,
+                    "included_columns": [0, 2],
+                },
+            )
+            self.assertEqual(200, created.status_code, created.text)
+            workspace = created.json()
+            note_type = workspace["note_types"][0]
+            self.assertEqual(["Front", "Back"], [field["name"] for field in note_type["fields"]])
+            self.assertEqual([["hello", "world"]], note_type["notes"])
+
     def test_media_delete_requires_force_when_referenced(self) -> None:
         asset = self.root / "badge.svg"
         asset.write_text('<svg xmlns="http://www.w3.org/2000/svg"/>', encoding="utf-8")
