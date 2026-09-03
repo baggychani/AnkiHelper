@@ -30,14 +30,52 @@ export type PreviewDocumentOptions = {
   nightMode?: boolean
 }
 
-const PLATFORM_CLASSES: Record<PreviewPlatform, string[]> = {
-  desktop: ['win'],
-  ankidroid: ['mobile', 'android', 'linux', 'chrome'],
+/** css_browser_selector classes Anki's webview puts on <html>. */
+const DOCUMENT_CLASSES: Record<PreviewPlatform, string[]> = {
+  desktop: ['js', 'webkit', 'chrome', 'win'],
+  ankidroid: ['js', 'webkit', 'chrome', 'mobile', 'android', 'linux'],
 }
 
-function nightClassesFor(platform: PreviewPlatform): string[] {
-  return platform === 'ankidroid' ? ['nightMode', 'night_mode', 'ankidroid_dark_mode'] : ['nightMode']
+/** What Anki's body_classes_for_card_ord() adds next to `card cardN`. */
+const BODY_CLASSES: Record<PreviewPlatform, string[]> = {
+  desktop: ['isWin'],
+  ankidroid: [],
 }
+
+const NIGHT_CLASSES: Record<PreviewPlatform, string[]> = {
+  desktop: ['nightMode', 'night_mode'],
+  ankidroid: ['night_mode', 'nightMode', 'ankidroid_dark_mode'],
+}
+
+/** Anki desktop defines this before card scripts run; AnkiDroid leaves it unset. */
+const ANKI_PLATFORM: Record<PreviewPlatform, string | null> = {
+  desktop: 'desktop',
+  ankidroid: null,
+}
+
+/** Anki's reviewer.scss, which cascades before the note type styling. */
+const REVIEWER_CSS = [
+  'html{height:100%;background:#fff}',
+  'html.nightMode{background:#2f2f31}',
+  'html.ankidroid_dark_mode{background:#303030}',
+  'body{margin:20px;min-height:calc(100% - 40px);box-sizing:border-box;overflow-wrap:break-word;',
+  'background-size:cover;background-repeat:no-repeat;background-position:top;background-attachment:fixed}',
+  'body.nightMode{background-color:#2f2f31;color:#f5f5f5}',
+  'body.ankidroid_dark_mode{background-color:#303030}',
+  'hr{background-color:#a0a0a0;margin:1em 0;border:none;height:1px}',
+  'img{max-width:100%;max-height:95vh}',
+  'li{text-align:start}',
+  'pre{text-align:left}',
+  'button{margin:1em 0.5em}',
+  '#typeans{width:100%;box-sizing:border-box;line-height:1.75}',
+  'code#typeans{white-space:pre-wrap;font-variant-ligatures:none}',
+  '.typeGood{background:#afa;color:black}',
+  '.typeBad{color:black;background:#faa}',
+  '.typeMissed{color:black;background:#ccc}',
+  '.nightMode .latex{filter:invert(100%)}',
+  '.drawing{zoom:50%}',
+  '.nightMode img.drawing{filter:invert(1) hue-rotate(180deg)}',
+].join('')
 
 /**
  * Listens for appearance updates from the parent window so switching PC/AnkiDroid
@@ -45,20 +83,24 @@ function nightClassesFor(platform: PreviewPlatform): string[] {
  * iframe reload (which flashes blank white and interrupts autoplaying audio).
  */
 function buildAppearanceScript(): string {
-  const platformClassesJson = JSON.stringify(PLATFORM_CLASSES)
+  const documentJson = JSON.stringify(DOCUMENT_CLASSES)
+  const bodyJson = JSON.stringify(BODY_CLASSES)
+  const nightJson = JSON.stringify(NIGHT_CLASSES)
+  const platformJson = JSON.stringify(ANKI_PLATFORM)
   const screenJson = JSON.stringify(PREVIEW_SCREEN)
-  return `<script>(()=>{const PLATFORM_CLASSES=${platformClassesJson};const SCREEN=${screenJson};const nightClassesFor=(platform)=>platform==="ankidroid"?["nightMode","night_mode","ankidroid_dark_mode"]:["nightMode"];const allPlatformClasses=Object.values(PLATFORM_CLASSES).flat();const allNightClasses=["nightMode","night_mode","ankidroid_dark_mode"];const apply=(platform,nightMode)=>{const targets=[document.documentElement,document.body];for(const target of targets){target.classList.remove(...allPlatformClasses,...allNightClasses);target.classList.add(...(PLATFORM_CLASSES[platform]||PLATFORM_CLASSES.desktop));if(nightMode)target.classList.add(...nightClassesFor(platform))}const screen=SCREEN[platform]||SCREEN.desktop;const meta=document.querySelector('meta[name="viewport"]');if(meta)meta.setAttribute("content","width="+screen.width+",initial-scale=1")};window.addEventListener("message",(event)=>{const data=event.data;if(!data||data.type!=="ankihelper:appearance")return;apply(data.platform,data.nightMode)})})()</script>`
+  return `<script>(()=>{const DOC=${documentJson};const BODY=${bodyJson};const NIGHT=${nightJson};const PLATFORM=${platformJson};const SCREEN=${screenJson};const union=(map)=>[...new Set(Object.values(map).flat())];const allDoc=union(DOC);const allBody=union(BODY);const allNight=union(NIGHT);const apply=(platform,nightMode)=>{const doc=DOC[platform]||DOC.desktop;const body=BODY[platform]||BODY.desktop;const night=nightMode?(NIGHT[platform]||NIGHT.desktop):[];const html=document.documentElement;html.classList.remove(...allDoc,...allNight);html.classList.add(...doc,...night);document.body.classList.remove(...allBody,...allNight);document.body.classList.add(...body,...night);try{const value=PLATFORM[platform];if(value)globalThis.ankiPlatform=value;else delete globalThis.ankiPlatform}catch(_error){}const screen=SCREEN[platform]||SCREEN.desktop;const meta=document.querySelector('meta[name="viewport"]');if(meta)meta.setAttribute("content","width="+screen.width+",initial-scale=1")};window.addEventListener("message",(event)=>{const data=event.data;if(!data||data.type!=="ankihelper:appearance")return;apply(data.platform,data.nightMode)})})()</script>`
 }
 
 export function buildPreviewDocument(previewHtml: string, options: PreviewDocumentOptions = {}): string {
   const templateIndex = Math.max(0, options.templateIndex ?? 0)
   const platform = options.platform ?? 'desktop'
   const nightMode = options.nightMode ?? false
-  const platformClasses = PLATFORM_CLASSES[platform]
-  const nightClasses = nightMode ? nightClassesFor(platform) : []
-  const documentClasses = [...platformClasses, ...nightClasses].join(' ')
-  const bodyClasses = ['card', `card${templateIndex + 1}`, ...platformClasses, ...nightClasses].join(' ')
+  const nightClasses = nightMode ? NIGHT_CLASSES[platform] : []
+  const documentClasses = [...DOCUMENT_CLASSES[platform], ...nightClasses].join(' ')
+  const bodyClasses = ['card', `card${templateIndex + 1}`, ...BODY_CLASSES[platform], ...nightClasses].join(' ')
   const screen = PREVIEW_SCREEN[platform]
-  const defaults = 'html,body{width:100%;height:100%;margin:0}body{box-sizing:border-box;background:#fff;overflow-wrap:break-word}video{max-width:100%}body.nightMode{background:#2f2f31;color:#f5f5f5}body.ankidroid_dark_mode{background:#303030}'
-  return `<!doctype html><html class="${documentClasses}"><head><meta name="viewport" content="width=${screen.width},initial-scale=1"><meta http-equiv="Content-Security-Policy" content="${previewContentSecurityPolicy}"><style>${defaults}</style></head><body class="${bodyClasses}">${previewHtml}${buildPreviewAudioScript()}${buildAppearanceScript()}</body></html>`
+  const ankiPlatform = ANKI_PLATFORM[platform]
+  // Anki defines ankiPlatform before the card HTML, so template scripts can read it.
+  const platformScript = ankiPlatform ? `<script>globalThis.ankiPlatform="${ankiPlatform}"</script>` : ''
+  return `<!doctype html><html class="${documentClasses}"><head><meta name="viewport" content="width=${screen.width},initial-scale=1"><meta http-equiv="Content-Security-Policy" content="${previewContentSecurityPolicy}"><style>${REVIEWER_CSS}</style>${platformScript}</head><body class="${bodyClasses}"><div id="qa">${previewHtml}</div>${buildPreviewAudioScript()}${buildAppearanceScript()}</body></html>`
 }

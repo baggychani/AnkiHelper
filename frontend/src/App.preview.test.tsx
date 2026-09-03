@@ -113,7 +113,7 @@ describe('App preview navigation', () => {
 
     await user.click(await screen.findByRole('button', { name: '실시간 미리보기' }))
     const iframe = await screen.findByTitle('카드 미리보기') as HTMLIFrameElement
-    await waitFor(() => expect(screen.getByTitle('카드 미리보기').getAttribute('srcdoc')).toContain('<body class="card card1 win">'))
+    await waitFor(() => expect(screen.getByTitle('카드 미리보기').getAttribute('srcdoc')).toContain('<body class="card card1 isWin">'))
     expect(iframe.getAttribute('sandbox')).toBe('allow-scripts')
     expect(iframe.getAttribute('referrerpolicy')).toBe('no-referrer')
     expect(iframe.style.width).toBe('1280px')
