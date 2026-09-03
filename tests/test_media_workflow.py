@@ -103,17 +103,17 @@ class MediaWorkflowTests(unittest.TestCase):
         with zipfile.ZipFile(archive_path) as archive:
             self.assertEqual(["media/answer.oga"], archive.namelist())
 
-    def test_fonts_keep_original_name_unless_added_as_template_assets(self) -> None:
+    def test_fonts_follow_anki_underscore_template_name(self) -> None:
         font = self.root / "KNMaiyuan-Regular.ttf"
         font.write_bytes(b"OTTO")
         added = import_media(self.package, [font])
-        self.assertEqual("KNMaiyuan-Regular.ttf", added[0]["name"])
+        self.assertEqual("_KNMaiyuan-Regular.ttf", added[0]["name"])
         self.assertEqual("font", added[0]["type"])
 
-        design = self.root / "KNMaiyuan-Regular.otf"
-        design.write_bytes(b"OTTO")
-        prefixed = import_media(self.package, [design], template_asset=True)
-        self.assertEqual("_KNMaiyuan-Regular.otf", prefixed[0]["name"])
+        already_prefixed = self.root / "_Existing.woff2"
+        already_prefixed.write_bytes(b"wOF2")
+        second = import_media(self.package, [already_prefixed])
+        self.assertEqual("_Existing.woff2", second[0]["name"])
 
     def test_exports_reject_unsafe_media_names_before_creating_archives(self) -> None:
         added = import_media(self.package, [self.asset])

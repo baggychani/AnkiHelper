@@ -1427,7 +1427,10 @@ def import_media(package: DeckPackage, paths: list[str | Path], *, template_asse
             if not source.is_file():
                 raise ValueError(f"미디어 파일을 찾을 수 없습니다: {source.name or source}")
             name = _safe_media_name(source.name)
-            if template_asset:
+            # Anki's font install guide names template fonts `_arial.ttf` and
+            # requires CSS `url()` to use that same name. Fonts are not field
+            # media, so regular add follows the same rule as 디자인용 추가.
+            if template_asset or _media_type(name) == "font":
                 name = "_" + name.lstrip("_")
             name = _unique_media_name(name, used_names)
             used_names.add(name)

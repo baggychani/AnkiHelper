@@ -413,6 +413,25 @@ class BackendApiTests(unittest.TestCase):
             self.assertNotIn('url("_badge.svg")', preview)
             self.assertEqual(3, len(badge_url.findall(preview)))
 
+    def test_preview_resolves_anki_font_face_underscore_urls(self) -> None:
+        font = self.root / "KNMaiyuan-Regular.ttf"
+        font.write_bytes(b"OTTO")
+
+        with TestClient(backend.app) as client:
+            _workspace, note_type_id = self._open_workspace(client)
+            imported = client.post("/api/media/import", json={"paths": [str(font)]})
+            self.assertEqual(200, imported.status_code, imported.text)
+            self.assertEqual("_KNMaiyuan-Regular.ttf", imported.json()["items"][0]["name"])
+            client.patch(
+                f"/api/note-types/{note_type_id}/css",
+                json={"css": '@font-face { font-family: myfont; src: url("_KNMaiyuan-Regular.ttf"); }'},
+            )
+            preview = client.get(f"/api/note-types/{note_type_id}/preview").json()["html"]
+            font_item = next(item for item in client.get("/api/media").json() if item["name"] == "_KNMaiyuan-Regular.ttf")
+            font_url = re.compile(rf"/api/preview-media/[^/]+/{re.escape(font_item['stored_name'])}")
+            self.assertNotIn('url("_KNMaiyuan-Regular.ttf")', preview)
+            self.assertGreaterEqual(len(font_url.findall(preview)), 1)
+
     def test_preview_uses_anki_compatible_replay_button(self) -> None:
         with TestClient(backend.app) as client:
             _workspace, note_type_id = self._open_workspace(client)
