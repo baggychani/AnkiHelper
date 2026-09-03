@@ -127,6 +127,12 @@ describe('App preview navigation', () => {
     expect(screen.getByText('ANKIDROID 미리보기')).toBeTruthy()
     expect(iframe.style.width).toBe('360px')
     expect(iframe.style.height).toBe('800px')
+    const shell = screen.getByTestId('preview-device-shell')
+    expect(shell.className).toContain('min-w-0')
+    expect(shell.style.transition).toContain('width')
+    const scaled = shell.firstElementChild as HTMLElement
+    expect(scaled.className).toContain('absolute')
+    expect(scaled.style.transition).toContain('transform')
 
     await user.click(screen.getByRole('button', { name: '야간 모드' }))
     await waitFor(() => expect(postMessageSpy).toHaveBeenCalledWith({ type: 'ankihelper:appearance', platform: 'ankidroid', nightMode: true }, '*'))

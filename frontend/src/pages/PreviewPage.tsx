@@ -80,14 +80,21 @@ export function PreviewPage({ noteType, templateIndex, previewState, previewKey,
   const availableHeight = Math.max(0, stageSize.height - STAGE_PADDING)
   const scale = Math.max(0.05, Math.min(availableWidth / frame.width, availableHeight / frame.height, 1))
 
-  return <div className="mx-auto grid h-full min-h-[480px] max-w-[1420px] gap-3 lg:min-h-[620px] lg:grid-cols-[minmax(0,1fr)_230px] lg:gap-5 xl:grid-cols-[minmax(0,1fr)_250px]">
-    <section ref={stageRef} className="grid min-h-0 place-items-center overflow-hidden rounded-[20px] bg-[#172033] p-3 lg:rounded-[26px] lg:p-5">
+  return <div className="mx-auto grid h-full min-h-[480px] min-w-0 max-w-[1420px] gap-3 lg:min-h-[620px] lg:grid-cols-[minmax(0,1fr)_230px] lg:gap-5 xl:grid-cols-[minmax(0,1fr)_250px]">
+    <section ref={stageRef} className="grid h-full min-h-0 min-w-0 place-items-center overflow-hidden rounded-[20px] bg-[#172033] p-3 lg:rounded-[26px] lg:p-5">
       {doc === null ? <div role="status" className="grid h-full min-h-40 place-items-center text-xs font-medium text-slate-400">카드를 불러오는 중…</div> : (
-        <div style={{ width: frame.width * scale, height: frame.height * scale, overflow: 'hidden' }}>
-          <div style={{ width: frame.width, height: frame.height, transform: `scale(${scale})`, transformOrigin: 'top left' }}>
+        <div
+          data-testid="preview-device-shell"
+          className="relative min-h-0 min-w-0"
+          style={{ width: frame.width * scale, height: frame.height * scale, transition: 'width 500ms ease-out, height 500ms ease-out' }}
+        >
+          <div
+            className="absolute left-0 top-0"
+            style={{ width: frame.width, height: frame.height, transform: `scale(${scale})`, transformOrigin: 'top left', transition: 'transform 500ms ease-out' }}
+          >
             <div
-              className="flex flex-col overflow-hidden border-[#0a0f1d] bg-white shadow-2xl"
-              style={{ width: frame.width, height: frame.height, borderStyle: 'solid', borderWidth: frame.bezel, borderRadius: FRAME_RADIUS[platform], boxSizing: 'border-box' }}
+              className="flex h-full w-full flex-col overflow-hidden border-[#0a0f1d] bg-white shadow-2xl"
+              style={{ borderStyle: 'solid', borderWidth: frame.bezel, borderRadius: FRAME_RADIUS[platform], boxSizing: 'border-box', transition: 'border-width 500ms ease-out, border-radius 500ms ease-out' }}
             >
               <div className="flex h-11 shrink-0 items-center justify-between border-b px-5 text-[11px] text-slate-400"><span className="h-2 w-2 rounded-full bg-emerald-400" /><b>{deviceLabel} 미리보기</b><span>{noteIndex + 1} / {total}</span></div>
               <iframe
