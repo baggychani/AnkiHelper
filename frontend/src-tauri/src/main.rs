@@ -47,6 +47,7 @@ const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: u32 = 0x0000_2000;
 const JOB_OBJECT_EXTENDED_LIMIT_INFORMATION: u32 = 9;
 
 struct BackendProcess(Mutex<Option<Child>>);
+struct ApiToken(String);
 
 #[cfg(windows)]
 fn backend_job() -> isize {
@@ -211,7 +212,30 @@ fn free_backend_port() {
     }
 }
 
-fn spawn_dev_backend() -> Result<Child, String> {
+fn random_api_token() -> Result<String, String> {
+    let mut bytes = [0u8; 32];
+    #[cfg(windows)]
+    {
+        #[link(name = "bcrypt")]
+        extern "system" {
+            fn BCryptGenRandom(algorithm: isize, buffer: *mut u8, length: u32, flags: u32) -> i32;
+        }
+        const BCRYPT_USE_SYSTEM_PREFERRED_RNG: u32 = 0x0000_0002;
+        let status = unsafe {
+            BCryptGenRandom(0, bytes.as_mut_ptr(), bytes.len() as u32, BCRYPT_USE_SYSTEM_PREFERRED_RNG)
+        };
+        if status != 0 {
+            return Err("로컬 API 토큰을 만들지 못했습니다.".into());
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        return Err("Anki Helper generates the local API token on Windows only.".into());
+    }
+    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+fn spawn_dev_backend(token: &str) -> Result<Child, String> {
     free_backend_port();
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -234,17 +258,20 @@ fn spawn_dev_backend() -> Result<Child, String> {
             "8765",
         ])
         .current_dir(&root)
-        .env("PYTHONPATH", root.join("src"));
+        .env("PYTHONPATH", root.join("src"))
+        .env("ANKI_HELPER_API_TOKEN", token);
     spawn_process(command)
 }
 
-fn start_backend() -> Result<Child, String> {
+fn start_backend(token: &str) -> Result<Child, String> {
     free_backend_port();
     if let Some(path) = bundled_backend() {
-        return spawn_process(Command::new(path));
+        let mut command = Command::new(path);
+        command.env("ANKI_HELPER_API_TOKEN", token);
+        return spawn_process(command);
     }
 
-    spawn_dev_backend()
+    spawn_dev_backend(token)
 }
 
 #[cfg(windows)]
@@ -282,6 +309,11 @@ fn show_startup_error(message: &str) {
 }
 
 #[tauri::command]
+fn api_token(token: tauri::State<ApiToken>) -> String {
+    token.0.clone()
+}
+
+#[tauri::command]
 fn show_main_window(window: WebviewWindow) -> Result<(), String> {
     if should_start_maximized(&window) {
         let _ = window.maximize();
@@ -292,24 +324,35 @@ fn show_main_window(window: WebviewWindow) -> Result<(), String> {
 }
 
 fn main() {
+    let token = match random_api_token() {
+        Ok(token) => token,
+        Err(message) => {
+            show_startup_error(&message);
+            std::process::exit(1);
+        }
+    };
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_opener::init())
-        .setup(|app| {
-            match start_backend() {
-                Ok(child) => {
-                    app.manage(BackendProcess(Mutex::new(Some(child))));
+        .setup({
+            let token = token.clone();
+            move |app| {
+                match start_backend(&token) {
+                    Ok(child) => {
+                        app.manage(BackendProcess(Mutex::new(Some(child))));
+                        app.manage(ApiToken(token));
+                    }
+                    Err(message) => {
+                        show_startup_error(&message);
+                        return Err(message.into());
+                    }
                 }
-                Err(message) => {
-                    show_startup_error(&message);
-                    return Err(message.into());
-                }
-            }
 
-            Ok(())
+                Ok(())
+            }
         })
-        .invoke_handler(tauri::generate_handler![show_main_window])
+        .invoke_handler(tauri::generate_handler![show_main_window, api_token])
         .build(tauri::generate_context!())
         .expect("error while running Anki Helper");
 

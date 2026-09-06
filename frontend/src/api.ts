@@ -37,11 +37,48 @@ export type SourceNoteType = { id: string; name: string; fields: Field[]; templa
 export type NoteTypeSource = { source_name: string; note_types: SourceNoteType[] }
 
 const base = import.meta.env.VITE_API_URL ?? 'http://127.0.0.1:8765'
+const API_TOKEN_HEADER = 'X-Anki-Helper-Token'
+
+let apiToken = ''
+let tokenReady: Promise<string> | null = null
+
+export function configureApiToken(token: string) {
+  apiToken = token
+  tokenReady = Promise.resolve(token)
+}
+
+export async function ready(): Promise<void> {
+  if (tokenReady) {
+    await tokenReady
+    return
+  }
+  tokenReady = (async () => {
+    try {
+      const { invoke } = await import('@tauri-apps/api/core')
+      apiToken = await invoke<string>('api_token')
+    } catch {
+      apiToken = ''
+    }
+    return apiToken
+  })()
+  await tokenReady
+}
+
+function authHeaders(): Record<string, string> {
+  return apiToken ? { [API_TOKEN_HEADER]: apiToken } : {}
+}
+
+function withAccessToken(url: string): string {
+  if (!apiToken) return url
+  const joiner = url.includes('?') ? '&' : '?'
+  return `${url}${joiner}access_token=${encodeURIComponent(apiToken)}`
+}
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  await ready()
   const response = await fetch(`${base}${path}`, {
     ...init,
-    headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
+    headers: { 'Content-Type': 'application/json', ...authHeaders(), ...(init?.headers ?? {}) },
   })
   if (!response.ok) {
     const detail = await response.json().catch(() => ({ detail: '요청을 처리하지 못했습니다.' }))
@@ -51,6 +88,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  ready,
   status: () => request<Workspace | null>('/api/workspace'),
   selectNoteType: (noteTypeId: string) =>
     request<Workspace>('/api/workspace/selected-note-type', {
@@ -150,7 +188,7 @@ export const api = {
   // One request for many files: the engine scans the deck for references once
   // instead of once per file.
   deleteMediaFiles: (storedNames: string[], force = false) => request<{ workspace: Workspace }>('/api/media/delete', { method: 'POST', body: JSON.stringify({ stored_names: storedNames, force }) }),
-  mediaUrl: (storedName: string) => `${base}/api/media/${encodeURIComponent(storedName)}`,
+  mediaUrl: (storedName: string) => withAccessToken(`${base}/api/media/${encodeURIComponent(storedName)}`),
   importProject: (path: string) => request<{ workspace: Workspace; note_type_id: string }>('/api/projects/import', { method: 'POST', body: JSON.stringify({ path }) }),
   preview: (noteTypeId: string, templateIndex: number, side: 'front' | 'back', noteIndex: number, clozeOrdinal = 0, signal?: AbortSignal) =>
     request<{ html: string; cloze_ordinals: number[]; cloze_ordinal: number }>(`/api/note-types/${noteTypeId}/preview?template_index=${templateIndex}&side=${side}&note_index=${noteIndex}&cloze_ordinal=${clozeOrdinal}`, { signal }),
@@ -159,6 +197,6 @@ export const api = {
     if (kind === 'media' && mediaType) params.set('media_type', mediaType)
     if (kind === 'media' && storedNames?.length) storedNames.forEach((name) => params.append('names', name))
     const query = params.toString()
-    return `${base}/api/note-types/${noteTypeId}/export/${kind}${query ? `?${query}` : ''}`
+    return withAccessToken(`${base}/api/note-types/${noteTypeId}/export/${kind}${query ? `?${query}` : ''}`)
   },
 }

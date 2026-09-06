@@ -7,6 +7,7 @@ the installed desktop UI and the existing APKG parsing/export domain code.
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+import os
 import tempfile
 import base64
 import hashlib
@@ -26,9 +27,10 @@ from urllib.parse import quote
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel
 from starlette.background import BackgroundTask
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from .anki_package import (
     ApkgReadError,
@@ -93,6 +95,44 @@ async def lifespan(application: FastAPI):
 
 app = FastAPI(title="Anki Helper local engine", docs_url=None, redoc_url=None, lifespan=lifespan)
 app.state.workspace = BackendState()
+
+API_TOKEN_ENV = "ANKI_HELPER_API_TOKEN"
+API_TOKEN_HEADER = "x-anki-helper-token"
+
+
+def _configured_api_token() -> str:
+    return os.environ.get(API_TOKEN_ENV, "").strip()
+
+
+def _provided_api_token(request: Request) -> str:
+    header = request.headers.get(API_TOKEN_HEADER, "").strip()
+    query = request.query_params.get("access_token", "").strip()
+    return header or query
+
+
+def _is_public_local_path(path: str) -> bool:
+    return path in {"/health", "/api/health"} or path.startswith("/api/preview-media/")
+
+
+class LocalApiTokenMiddleware(BaseHTTPMiddleware):
+    """Lock the loopback API when the desktop shell issued a session token.
+
+    Preview media keeps its own capability token in the URL so the sandboxed
+    card iframe can load images without this header. Added before CORS so a
+    401 still gets Access-Control-Allow-Origin.
+    """
+
+    async def dispatch(self, request: Request, call_next):
+        expected = _configured_api_token()
+        if not expected or _is_public_local_path(request.url.path):
+            return await call_next(request)
+        provided = _provided_api_token(request)
+        if not provided or not secrets.compare_digest(provided, expected):
+            return JSONResponse({"detail": "로컬 API 토큰이 필요합니다."}, status_code=401)
+        return await call_next(request)
+
+
+app.add_middleware(LocalApiTokenMiddleware)
 app.add_middleware(
     CORSMiddleware,
     # Tauri 2's Windows WebView uses http://tauri.localhost.  The backend is
@@ -117,6 +157,8 @@ def _backend_state() -> BackendState:
 def _rotate_preview_token(state: BackendState) -> None:
     """Invalidate preview-only media URLs when the active package changes."""
     state.preview_token = secrets.token_urlsafe(32)
+
+
 _sound_marker = re.compile(
     r"<span class=(?P<class_quote>[\"'])sound(?P=class_quote)\s+"
     r"(?:(?:data-anki-autoplay=(?P<autoplay_quote>[\"'])(?P<autoplay>.*?)(?P=autoplay_quote))\s+)?"

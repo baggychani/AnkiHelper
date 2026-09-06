@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { api } from './api'
+import { api, configureApiToken } from './api'
 
 
 afterEach(() => {
+  configureApiToken('')
   vi.unstubAllGlobals()
   vi.restoreAllMocks()
 })
@@ -20,6 +21,27 @@ describe('API client', () => {
     expect(fetchMock).toHaveBeenCalledWith(
       'http://127.0.0.1:8765/api/workspace',
       expect.objectContaining({ headers: { 'Content-Type': 'application/json' } }),
+    )
+  })
+
+  it('sends the desktop API token on JSON and media URLs', async () => {
+    configureApiToken('session-token')
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: vi.fn().mockResolvedValue(null),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(api.status()).resolves.toBeNull()
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://127.0.0.1:8765/api/workspace',
+      expect.objectContaining({
+        headers: { 'Content-Type': 'application/json', 'X-Anki-Helper-Token': 'session-token' },
+      }),
+    )
+    expect(api.mediaUrl('0')).toBe('http://127.0.0.1:8765/api/media/0?access_token=session-token')
+    expect(api.exportUrl('media', 'nt-1', 'audio')).toBe(
+      'http://127.0.0.1:8765/api/note-types/nt-1/export/media?media_type=audio&access_token=session-token',
     )
   })
 

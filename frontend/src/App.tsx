@@ -143,7 +143,7 @@ function App() {
     dispatchPreview({ type: 'reset' })
   }, [templateIndex])
 
-  useEffect(() => { api.status().then((saved) => saved && hydrate(saved)).catch(() => undefined) }, [hydrate])
+  useEffect(() => { void api.ready().then(() => api.status()).then((saved) => saved && hydrate(saved)).catch(() => undefined) }, [hydrate])
 
   useEffect(() => {
     if (!('__TAURI_INTERNALS__' in window)) return

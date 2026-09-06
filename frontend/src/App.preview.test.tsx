@@ -10,6 +10,7 @@ import { api, type Workspace } from './api'
 
 vi.mock('./api', () => ({
   api: {
+    ready: vi.fn().mockResolvedValue(undefined),
     status: vi.fn(),
     preview: vi.fn(),
   },

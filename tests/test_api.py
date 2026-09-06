@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import io
+import os
 import re
 import tempfile
 import unittest
@@ -70,6 +71,37 @@ class BackendApiTests(unittest.TestCase):
         with TestClient(backend.app) as client:
             self.assertEqual({"ok": True}, client.get("/api/health").json())
             self.assertIsNone(client.get("/api/workspace").json())
+
+    def test_loopback_api_token_rejects_unauthenticated_calls(self) -> None:
+        headers = {backend.API_TOKEN_HEADER: "session-token"}
+        with patch.dict(os.environ, {backend.API_TOKEN_ENV: "session-token"}, clear=False):
+            with TestClient(backend.app) as client:
+                denied = client.get("/api/workspace")
+                self.assertEqual(401, denied.status_code, denied.text)
+                self.assertEqual({"ok": True}, client.get("/api/health").json())
+                allowed = client.get("/api/workspace", headers=headers)
+                self.assertEqual(200, allowed.status_code, allowed.text)
+                via_query = client.get("/api/workspace", params={"access_token": "session-token"})
+                self.assertEqual(200, via_query.status_code, via_query.text)
+
+    def test_preview_media_stays_on_its_own_capability_token(self) -> None:
+        headers = {backend.API_TOKEN_HEADER: "session-token"}
+        with patch.dict(os.environ, {backend.API_TOKEN_ENV: "session-token"}, clear=False):
+            with TestClient(backend.app) as client:
+                opened = client.post("/api/packages/open", json={"path": str(self.package.source)}, headers=headers)
+                self.assertEqual(200, opened.status_code, opened.text)
+                note_type_id = opened.json()["selected_note_type_id"]
+                preview = client.get(
+                    f"/api/note-types/{note_type_id}/preview",
+                    params={"side": "back"},
+                    headers=headers,
+                )
+                self.assertEqual(200, preview.status_code, preview.text)
+                match = re.search(r"/api/preview-media/([^/]+)/0", preview.json()["html"])
+                self.assertIsNotNone(match, preview.text)
+                preview_media = client.get(f"/api/preview-media/{match.group(1)}/0")
+                self.assertEqual(200, preview_media.status_code, preview_media.text)
+                self.assertEqual(401, client.get("/api/media/0").status_code)
 
     def test_open_preview_and_range_media_round_trip(self) -> None:
         with TestClient(backend.app) as client:
