@@ -27,6 +27,8 @@ jobs:
     runs-on: windows-2022
     permissions:
       contents: write
+    env:
+      HAS_WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE != '' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -84,7 +86,7 @@ jobs:
 
       - name: Import Windows code-signing certificate
         id: codesign
-        if: ${{ secrets.WINDOWS_CERTIFICATE != '' }}
+        if: env.HAS_WINDOWS_CERTIFICATE == 'true'
         env:
           WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
           WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
@@ -98,7 +100,7 @@ jobs:
           python scripts/patch_windows_signing.py
 
       - name: Note unsigned Windows build
-        if: ${{ secrets.WINDOWS_CERTIFICATE == '' }}
+        if: env.HAS_WINDOWS_CERTIFICATE != 'true'
         run: echo "WINDOWS_CERTIFICATE secret is not set. The installer will be unsigned and may show SmartScreen."
 
       - name: Install Python dependencies
