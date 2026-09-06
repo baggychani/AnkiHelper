@@ -12,7 +12,7 @@ on:
         type: string
 
 concurrency:
-  group: release-${{ inputs.tag || github.ref }}
+  group: release-${{ github.event.inputs.tag || github.ref }}
   cancel-in-progress: false
 
 permissions:
@@ -50,7 +50,7 @@ jobs:
       - name: Validate release tag and app version
         id: release
         env:
-          ENTERED_TAG: ${{ inputs.tag }}
+          ENTERED_TAG: ${{ github.event.inputs.tag }}
         shell: pwsh
         run: |
           $packageVersion = (Get-Content -Raw frontend/package.json | ConvertFrom-Json).version
