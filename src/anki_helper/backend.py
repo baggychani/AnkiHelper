@@ -549,7 +549,9 @@ def _embed_preview_media(
         serialized = json.dumps(urls, ensure_ascii=False).replace("<", "\\u003c").replace(">", "\\u003e")
         return f"""<script>(function(){{
 const assets={serialized};
-const cardState={{session:Object.create(null),local:Object.create(null)}};
+// Anki keeps Storage on the reviewer window while only #qa is replaced.
+// Reuse the same buckets when this script is injected again on a flip.
+const cardState=window.__ankiHelperCardState||(window.__ankiHelperCardState={{session:Object.create(null),local:Object.create(null)}});
 const storageFor=bucket=>({{
   get length(){{return Object.keys(bucket).length;}},
   key:index=>Object.keys(bucket)[index]??null,

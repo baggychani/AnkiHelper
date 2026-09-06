@@ -620,6 +620,13 @@ class BackendApiTests(unittest.TestCase):
             self.assertNotIn("window.parent", preview)
             self.assertIn('Object.defineProperty(window,"localStorage"', preview)
             self.assertIn('Object.defineProperty(window,"sessionStorage"', preview)
+            # Flipping a card re-injects this script into #qa. Anki does not
+            # allocate a fresh Storage on reveal, so the helper must reuse the
+            # same in-memory buckets instead of wiping the previous side's state.
+            self.assertIn(
+                "window.__ankiHelperCardState||(window.__ankiHelperCardState=",
+                preview,
+            )
 
     def test_preview_rewrites_linked_stylesheet_assets(self) -> None:
         asset = self.root / "badge.svg"

@@ -56,17 +56,25 @@ describe('App preview navigation', () => {
     render(<App />)
 
     await user.click(await screen.findByRole('button', { name: '실시간 미리보기' }))
-    await waitFor(() => expect(screen.getByTitle('카드 미리보기').getAttribute('srcdoc')).toContain('front-0'))
+    const iframe = await screen.findByTitle('카드 미리보기') as HTMLIFrameElement
+    await waitFor(() => expect(iframe.getAttribute('srcdoc')).toContain('front-0'))
+    const postMessageSpy = vi.spyOn(iframe.contentWindow as Window, 'postMessage')
 
     await user.click(screen.getByRole('button', { name: '뒷면' }))
-    await waitFor(() => expect(screen.getByTitle('카드 미리보기').getAttribute('srcdoc')).toContain('back-0'))
+    await waitFor(() => expect(postMessageSpy).toHaveBeenCalledWith(expect.objectContaining({ type: 'ankihelper:content', templateIndex: 0, html: expect.stringContaining('back-0') }), '*'))
 
     await user.click(screen.getByRole('button', { name: '다음' }))
-    await waitFor(() => expect(screen.getByTitle('카드 미리보기').getAttribute('srcdoc')).toContain('front-1'))
+    await waitFor(() => expect(postMessageSpy).toHaveBeenCalledWith(expect.objectContaining({ type: 'ankihelper:content', templateIndex: 0, html: expect.stringContaining('front-1') }), '*'))
     expect(screen.getByRole('button', { name: '앞면' }).className).toContain('bg-white')
 
     await user.click(screen.getByRole('button', { name: '뒷면' }))
-    await waitFor(() => expect(screen.getByTitle('카드 미리보기').getAttribute('srcdoc')).toContain('back-1'))
+    await waitFor(() => expect(postMessageSpy).toHaveBeenCalledWith(expect.objectContaining({ type: 'ankihelper:content', templateIndex: 0, html: expect.stringContaining('back-1') }), '*'))
+
+    // Side/note navigation within the same note type must never reload the
+    // iframe - a fresh srcdoc load is exactly what reset a card script's
+    // sessionStorage/localStorage (e.g. a mascot picked once per card) on
+    // every front/back flip.
+    expect(iframe.getAttribute('srcdoc')).toContain('front-0')
 
     const calls = vi.mocked(api.preview).mock.calls.map(([, , side, noteIndex]) => `${side}-${noteIndex}`)
     expect(calls.slice(-3)).toEqual(['back-0', 'front-1', 'back-1'])
@@ -83,11 +91,13 @@ describe('App preview navigation', () => {
     render(<App />)
 
     await user.click(await screen.findByRole('button', { name: '실시간 미리보기' }))
+    const iframe = await screen.findByTitle('카드 미리보기') as HTMLIFrameElement
     await waitFor(() => expect(screen.getByTestId('preview-cloze-picker')).toBeTruthy())
     expect(screen.getByRole('button', { name: 'c1' }).getAttribute('aria-pressed')).toBe('true')
+    const postMessageSpy = vi.spyOn(iframe.contentWindow as Window, 'postMessage')
 
     await user.click(screen.getByRole('button', { name: 'c3' }))
-    await waitFor(() => expect(screen.getByTitle('카드 미리보기').getAttribute('srcdoc')).toContain('c3-front-0'))
+    await waitFor(() => expect(postMessageSpy).toHaveBeenCalledWith(expect.objectContaining({ type: 'ankihelper:content', html: expect.stringContaining('c3-front-0') }), '*'))
     expect(screen.getByRole('button', { name: 'c3' }).getAttribute('aria-pressed')).toBe('true')
 
     // A different note has its own cloze numbers, so the picker starts over.
@@ -110,19 +120,23 @@ describe('App preview navigation', () => {
     const user = userEvent.setup()
     render(<App />)
     await user.click(await screen.findByRole('button', { name: '실시간 미리보기' }))
-    await waitFor(() => expect(screen.getByTitle('카드 미리보기').getAttribute('srcdoc')).toContain('front-0'))
+    const iframe = await screen.findByTitle('카드 미리보기') as HTMLIFrameElement
+    await waitFor(() => expect(iframe.getAttribute('srcdoc')).toContain('front-0'))
+    const postMessageSpy = vi.spyOn(iframe.contentWindow as Window, 'postMessage')
     await user.click(screen.getByRole('button', { name: '뒷면' }))
-    await waitFor(() => expect(screen.getByTitle('카드 미리보기').getAttribute('srcdoc')).toContain('back-0'))
+    await waitFor(() => expect(postMessageSpy).toHaveBeenCalledWith(expect.objectContaining({ type: 'ankihelper:content', html: expect.stringContaining('back-0') }), '*'))
 
     await user.click(screen.getByRole('button', { name: '다음' }))
-    expect(screen.getByTitle('카드 미리보기').getAttribute('srcdoc')).toContain('back-0')
+    // The fetch for front-1 hasn't resolved yet, so nothing new should have
+    // reached the iframe, and the UI must not show a loading state meanwhile.
+    expect(postMessageSpy).not.toHaveBeenCalledWith(expect.objectContaining({ html: expect.stringContaining('front-1') }), '*')
     expect(screen.queryByRole('status')).toBeNull()
     expect(screen.getByRole('button', { name: '뒷면' }).hasAttribute('disabled')).toBe(false)
     expect(screen.getByRole('button', { name: '다음' }).hasAttribute('disabled')).toBe(false)
 
     await waitFor(() => expect(resolveNext).toBeTypeOf('function'))
     resolveNext?.({ html: '<div data-preview="front-1">front-1</div>', cloze_ordinals: [], cloze_ordinal: 0 })
-    await waitFor(() => expect(screen.getByTitle('카드 미리보기').getAttribute('srcdoc')).toContain('front-1'))
+    await waitFor(() => expect(postMessageSpy).toHaveBeenCalledWith(expect.objectContaining({ type: 'ankihelper:content', html: expect.stringContaining('front-1') }), '*'))
   })
 
   it('shows preview request failures instead of silently leaving stale content', async () => {
@@ -156,11 +170,14 @@ describe('App preview navigation', () => {
     expect(iframe.style.width).toBe('360px')
     expect(iframe.style.height).toBe('800px')
     const shell = screen.getByTestId('preview-device-shell')
-    expect(shell.className).toContain('min-w-0')
+    expect(shell.style.transform).toContain('scale')
+    expect(shell.style.transformOrigin).toBe('center')
+    // The PC↔AnkiDroid shape change must actually animate, not just the
+    // compensating scale/border cosmetics around it - otherwise the frame's
+    // own width/height jump-cut to the new size on the very next paint.
     expect(shell.style.transition).toContain('width')
-    const scaled = shell.firstElementChild as HTMLElement
-    expect(scaled.className).toContain('absolute')
-    expect(scaled.style.transition).toContain('transform')
+    expect(shell.style.transition).toContain('height')
+    expect(shell.style.transition).toContain('transform')
 
     await user.click(screen.getByRole('button', { name: '야간 모드' }))
     await waitFor(() => expect(postMessageSpy).toHaveBeenCalledWith({ type: 'ankihelper:appearance', platform: 'ankidroid', nightMode: true }, '*'))

@@ -1,11 +1,10 @@
-import { useLayoutEffect, useRef, useState } from 'react'
+import { useCallback, useLayoutEffect, useRef, useState } from 'react'
 import { ArrowLeft, ArrowRight, Monitor, Moon, Smartphone, Sun } from 'lucide-react'
 import type { NoteType } from '../api'
 import { initialPreviewState, type PreviewSide } from '../previewLifecycle'
-import { buildPreviewDocument, PREVIEW_SCREEN, type PreviewPlatform } from '../previewAudio'
+import { buildPreviewDocument, PREVIEW_SCREEN, type PreviewLiveMessage, type PreviewPlatform } from '../previewAudio'
 
 const TITLE_BAR_HEIGHT = 44
-const STAGE_PADDING = 24
 const FRAME_BEZEL: Record<PreviewPlatform, number> = { desktop: 7, ankidroid: 10 }
 const FRAME_RADIUS: Record<PreviewPlatform, number> = { desktop: 28, ankidroid: 38 }
 
@@ -20,11 +19,10 @@ function frameSize(platform: PreviewPlatform) {
   }
 }
 
-export function PreviewPage({ noteType, templateIndex, previewState, previewKey, previewHtml, onSide, onNavigate, clozeCards, onCloze }: {
+export function PreviewPage({ noteType, templateIndex, previewState, previewHtml, onSide, onNavigate, clozeCards, onCloze }: {
   noteType?: NoteType
   templateIndex: number
   previewState: typeof initialPreviewState
-  previewKey: string
   previewHtml: string | null
   onSide: (side: PreviewSide) => void
   onNavigate: (delta: -1 | 1) => void
@@ -37,34 +35,66 @@ export function PreviewPage({ noteType, templateIndex, previewState, previewKey,
   const iframeRef = useRef<HTMLIFrameElement>(null)
   const [stageSize, setStageSize] = useState({ width: 1000, height: 700 })
   const appliedAppearanceRef = useRef({ platform, nightMode })
-  const [doc, setDoc] = useState<{ key: string; html: string } | null>(null)
+  // The iframe is never reloaded just because the note/side/cloze/template
+  // changed (see the effect below), so `postMessage` can otherwise race a
+  // still-loading document: queue messages sent before `onLoad` fires and
+  // flush them once the listener inside the iframe is actually attached.
+  const iframeReadyRef = useRef(false)
+  const pendingMessagesRef = useRef<PreviewLiveMessage[]>([])
+  const [doc, setDoc] = useState<{ noteTypeId: string; html: string } | null>(null)
+
+  const postToIframe = useCallback((message: PreviewLiveMessage) => {
+    if (iframeReadyRef.current) iframeRef.current?.contentWindow?.postMessage(message, '*')
+    else pendingMessagesRef.current.push(message)
+  }, [])
+
+  const handleIframeLoad = useCallback(() => {
+    iframeReadyRef.current = true
+    const queued = pendingMessagesRef.current
+    pendingMessagesRef.current = []
+    queued.forEach((message) => iframeRef.current?.contentWindow?.postMessage(message, '*'))
+  }, [])
 
   useLayoutEffect(() => {
-    if (previewHtml === null) return
-    setDoc((current) => current?.key === previewKey ? current : {
-      key: previewKey,
-      html: buildPreviewDocument(previewHtml, { templateIndex, platform, nightMode }),
+    if (previewHtml === null || !noteType) return
+    setDoc((current) => {
+      if (current && current.noteTypeId === noteType.id) {
+        // Same card/session as before: push the new front/back/note/cloze
+        // content into the *live* document instead of reloading the iframe,
+        // so any state a card script saved to session/localStorage (e.g. a
+        // randomly picked mascot that must match on both card sides) survives.
+        postToIframe({ type: 'ankihelper:content', html: previewHtml, templateIndex })
+        return current
+      }
+      // A genuinely different note type is a different CSS/script world, so
+      // starting it over with a fresh iframe (and thus fresh storage) is correct.
+      iframeReadyRef.current = false
+      pendingMessagesRef.current = []
+      appliedAppearanceRef.current = { platform, nightMode }
+      return { noteTypeId: noteType.id, html: buildPreviewDocument(previewHtml, { templateIndex, platform, nightMode }) }
     })
-  }, [previewHtml, previewKey, templateIndex, platform, nightMode])
-
-  useLayoutEffect(() => {
-    appliedAppearanceRef.current = { platform, nightMode }
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- tracks `doc` so a freshly built document is not restyled
-  }, [doc])
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- platform/nightMode intentionally excluded: they're only baked in for a brand-new doc above, and pushed live by the effect below otherwise
+  }, [previewHtml, noteType?.id, templateIndex, postToIframe])
 
   useLayoutEffect(() => {
     if (appliedAppearanceRef.current.platform === platform && appliedAppearanceRef.current.nightMode === nightMode) return
     appliedAppearanceRef.current = { platform, nightMode }
-    iframeRef.current?.contentWindow?.postMessage({ type: 'ankihelper:appearance', platform, nightMode }, '*')
-  }, [platform, nightMode])
+    postToIframe({ type: 'ankihelper:appearance', platform, nightMode })
+  }, [platform, nightMode, postToIframe])
 
   useLayoutEffect(() => {
     const stage = stageRef.current
     if (!stage) return
     const recompute = () => {
-      const rect = stage.getBoundingClientRect()
-      if (rect.width < 1 || rect.height < 1) return
-      setStageSize((current) => current.width === rect.width && current.height === rect.height ? current : { width: rect.width, height: rect.height })
+      // clientWidth/Height exclude borders and scrollbars but still include
+      // padding, so subtract the *actual* computed padding (which varies by
+      // breakpoint, e.g. p-3 vs lg:p-5) rather than a fixed guess - otherwise
+      // the device mockup overflows its box and gets clipped on one side.
+      const style = getComputedStyle(stage)
+      const width = stage.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight)
+      const height = stage.clientHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom)
+      if (width < 1 || height < 1) return
+      setStageSize((current) => current.width === width && current.height === height ? current : { width, height })
     }
     recompute()
     if (typeof ResizeObserver === 'undefined') return
@@ -78,37 +108,33 @@ export function PreviewPage({ noteType, templateIndex, previewState, previewKey,
   const { noteIndex, side } = previewState
   const deviceLabel = platform === 'ankidroid' ? 'ANKIDROID' : 'ANKI PC'
   const frame = frameSize(platform)
-  const availableWidth = Math.max(0, stageSize.width - STAGE_PADDING)
-  const availableHeight = Math.max(0, stageSize.height - STAGE_PADDING)
-  const scale = Math.max(0.05, Math.min(availableWidth / frame.width, availableHeight / frame.height, 1))
+  const scale = Math.max(0.05, Math.min(stageSize.width / frame.width, stageSize.height / frame.height, 1))
 
   return <div className="mx-auto grid h-full min-h-[480px] min-w-0 max-w-[1420px] gap-3 lg:min-h-[620px] lg:grid-cols-[minmax(0,1fr)_230px] lg:gap-5 xl:grid-cols-[minmax(0,1fr)_250px]">
     <section ref={stageRef} className="grid h-full min-h-0 min-w-0 place-items-center overflow-hidden rounded-[20px] bg-[#172033] p-3 lg:rounded-[26px] lg:p-5">
       {doc === null ? <div role="status" className="grid h-full min-h-40 place-items-center text-xs font-medium text-slate-400">카드를 불러오는 중…</div> : (
-        <div
-          data-testid="preview-device-shell"
-          className="relative min-h-0 min-w-0"
-          style={{ width: frame.width * scale, height: frame.height * scale, transition: 'width 500ms ease-out, height 500ms ease-out' }}
-        >
+        // The frame morphs between PC and AnkiDroid shapes via a single `transform: scale`
+        // around its own center - never top-left - so its on-screen center point stays put
+        // no matter how much the width/height ratio changes. This wrapper only exists to
+        // give the (potentially much larger than available space) frame a safe, fixed-size
+        // home to center within and clip against, so it can never distort the grid track.
+        <div className="relative flex h-full w-full min-h-0 min-w-0 items-center justify-center overflow-hidden">
           <div
-            className="absolute left-0 top-0"
-            style={{ width: frame.width, height: frame.height, transform: `scale(${scale})`, transformOrigin: 'top left', transition: 'transform 500ms ease-out' }}
+            data-testid="preview-device-shell"
+            className="flex shrink-0 flex-col overflow-hidden border-[#0a0f1d] bg-white shadow-2xl"
+            style={{ width: frame.width, height: frame.height, transform: `scale(${scale})`, transformOrigin: 'center', borderStyle: 'solid', borderWidth: frame.bezel, borderRadius: FRAME_RADIUS[platform], boxSizing: 'border-box', transition: 'width 500ms ease-out, height 500ms ease-out, transform 500ms ease-out, border-width 500ms ease-out, border-radius 500ms ease-out' }}
           >
-            <div
-              className="flex h-full w-full flex-col overflow-hidden border-[#0a0f1d] bg-white shadow-2xl"
-              style={{ borderStyle: 'solid', borderWidth: frame.bezel, borderRadius: FRAME_RADIUS[platform], boxSizing: 'border-box', transition: 'border-width 500ms ease-out, border-radius 500ms ease-out' }}
-            >
-              <div className="flex h-11 shrink-0 items-center justify-between border-b px-5 text-[11px] text-slate-400"><span className="h-2 w-2 rounded-full bg-emerald-400" /><b>{deviceLabel} 미리보기</b><span>{noteIndex + 1} / {total}</span></div>
-              <iframe
-                ref={iframeRef}
-                key={doc.key}
-                title="카드 미리보기"
-                sandbox="allow-scripts"
-                referrerPolicy="no-referrer"
-                srcDoc={doc.html}
-                style={{ width: frame.screen.width, height: frame.screen.height, border: 0, display: 'block' }}
-              />
-            </div>
+            <div className="flex h-11 shrink-0 items-center justify-between border-b px-5 text-[11px] text-slate-400"><span className="h-2 w-2 rounded-full bg-emerald-400" /><b>{deviceLabel} 미리보기</b><span>{noteIndex + 1} / {total}</span></div>
+            <iframe
+              ref={iframeRef}
+              key={doc.noteTypeId}
+              title="카드 미리보기"
+              sandbox="allow-scripts"
+              referrerPolicy="no-referrer"
+              srcDoc={doc.html}
+              onLoad={handleIframeLoad}
+              style={{ width: frame.screen.width, height: frame.screen.height, border: 0, display: 'block' }}
+            />
           </div>
         </div>
       )}

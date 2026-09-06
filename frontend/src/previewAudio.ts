@@ -77,18 +77,36 @@ const REVIEWER_CSS = [
   '.nightMode img.drawing{filter:invert(1) hue-rotate(180deg)}',
 ].join('')
 
+export type PreviewAppearanceMessage = { type: 'ankihelper:appearance'; platform: PreviewPlatform; nightMode: boolean }
+export type PreviewContentMessage = { type: 'ankihelper:content'; html: string; templateIndex: number }
+export type PreviewLiveMessage = PreviewAppearanceMessage | PreviewContentMessage
+
 /**
- * Listens for appearance updates from the parent window so switching PC/AnkiDroid
- * or night mode can restyle the already-loaded document instead of forcing a full
- * iframe reload (which flashes blank white and interrupts autoplaying audio).
+ * Listens for live updates from the parent window so switching PC/AnkiDroid,
+ * night mode, or the front/back/note/cloze side can restyle or re-render the
+ * already-loaded document instead of forcing a full iframe reload.
+ *
+ * A full reload matters for more than the blank-white flash and interrupted
+ * audio: this document runs inside a sandboxed `srcdoc` iframe with no
+ * `allow-same-origin`, so every fresh `srcdoc` load gets its own unique,
+ * throwaway origin. A card template that saves state to `sessionStorage` or
+ * `localStorage` to stay consistent across a front/back flip (e.g. a randomly
+ * picked mascot that should look the same on both sides of one card) can
+ * never see that state again once the iframe reloads - it always looks like
+ * a brand-new browsing context. Pushing new "qa" content into the *same*,
+ * never-reloaded document keeps that storage intact, matching how Anki's own
+ * webview flips a card in place rather than navigating to a new page.
+ * The card HTML also re-injects the Storage polyfill on every flip; that
+ * script reuses window.__ankiHelperCardState so it does not wipe the
+ * previous side's values the way a fresh `srcdoc` document would.
  */
-function buildAppearanceScript(): string {
+function buildLiveUpdateScript(): string {
   const documentJson = JSON.stringify(DOCUMENT_CLASSES)
   const bodyJson = JSON.stringify(BODY_CLASSES)
   const nightJson = JSON.stringify(NIGHT_CLASSES)
   const platformJson = JSON.stringify(ANKI_PLATFORM)
   const screenJson = JSON.stringify(PREVIEW_SCREEN)
-  return `<script>(()=>{const DOC=${documentJson};const BODY=${bodyJson};const NIGHT=${nightJson};const PLATFORM=${platformJson};const SCREEN=${screenJson};const union=(map)=>[...new Set(Object.values(map).flat())];const allDoc=union(DOC);const allBody=union(BODY);const allNight=union(NIGHT);const apply=(platform,nightMode)=>{const doc=DOC[platform]||DOC.desktop;const body=BODY[platform]||BODY.desktop;const night=nightMode?(NIGHT[platform]||NIGHT.desktop):[];const html=document.documentElement;html.classList.remove(...allDoc,...allNight);html.classList.add(...doc,...night);document.body.classList.remove(...allBody,...allNight);document.body.classList.add(...body,...night);try{const value=PLATFORM[platform];if(value)globalThis.ankiPlatform=value;else delete globalThis.ankiPlatform}catch(_error){}const screen=SCREEN[platform]||SCREEN.desktop;const meta=document.querySelector('meta[name="viewport"]');if(meta)meta.setAttribute("content","width="+screen.width+",initial-scale=1")};window.addEventListener("message",(event)=>{const data=event.data;if(!data||data.type!=="ankihelper:appearance")return;apply(data.platform,data.nightMode)})})()</script>`
+  return `<script>(()=>{const DOC=${documentJson};const BODY=${bodyJson};const NIGHT=${nightJson};const PLATFORM=${platformJson};const SCREEN=${screenJson};const union=(map)=>[...new Set(Object.values(map).flat())];const allDoc=union(DOC);const allBody=union(BODY);const allNight=union(NIGHT);const applyAppearance=(platform,nightMode)=>{const doc=DOC[platform]||DOC.desktop;const body=BODY[platform]||BODY.desktop;const night=nightMode?(NIGHT[platform]||NIGHT.desktop):[];const html=document.documentElement;html.classList.remove(...allDoc,...allNight);html.classList.add(...doc,...night);document.body.classList.remove(...allBody,...allNight);document.body.classList.add(...body,...night);try{const value=PLATFORM[platform];if(value)globalThis.ankiPlatform=value;else delete globalThis.ankiPlatform}catch(_error){}const screen=SCREEN[platform]||SCREEN.desktop;const meta=document.querySelector('meta[name="viewport"]');if(meta)meta.setAttribute("content","width="+screen.width+",initial-scale=1")};const applyContent=(html,templateIndex)=>{const qa=document.getElementById("qa");if(!qa)return;qa.innerHTML=html;qa.querySelectorAll("script").forEach((old)=>{const fresh=document.createElement("script");for(const attr of old.attributes)fresh.setAttribute(attr.name,attr.value);fresh.textContent=old.textContent;old.replaceWith(fresh)});document.body.className=document.body.className.replace(/\\bcard\\d+\\b/,"card"+(templateIndex+1))};window.addEventListener("message",(event)=>{const data=event.data;if(!data)return;if(data.type==="ankihelper:appearance")applyAppearance(data.platform,data.nightMode);else if(data.type==="ankihelper:content")applyContent(data.html,data.templateIndex)})})()</script>`
 }
 
 export function buildPreviewDocument(previewHtml: string, options: PreviewDocumentOptions = {}): string {
@@ -102,5 +120,5 @@ export function buildPreviewDocument(previewHtml: string, options: PreviewDocume
   const ankiPlatform = ANKI_PLATFORM[platform]
   // Anki defines ankiPlatform before the card HTML, so template scripts can read it.
   const platformScript = ankiPlatform ? `<script>globalThis.ankiPlatform="${ankiPlatform}"</script>` : ''
-  return `<!doctype html><html class="${documentClasses}"><head><meta name="viewport" content="width=${screen.width},initial-scale=1"><meta http-equiv="Content-Security-Policy" content="${previewContentSecurityPolicy}"><style>${REVIEWER_CSS}</style>${platformScript}</head><body class="${bodyClasses}"><div id="qa">${previewHtml}</div>${buildPreviewAudioScript()}${buildAppearanceScript()}</body></html>`
+  return `<!doctype html><html class="${documentClasses}"><head><meta name="viewport" content="width=${screen.width},initial-scale=1"><meta http-equiv="Content-Security-Policy" content="${previewContentSecurityPolicy}"><style>${REVIEWER_CSS}</style>${platformScript}</head><body class="${bodyClasses}"><div id="qa">${previewHtml}</div>${buildPreviewAudioScript()}${buildLiveUpdateScript()}</body></html>`
 }
