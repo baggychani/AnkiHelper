@@ -11,12 +11,22 @@ on:
         required: false
         type: string
 
+concurrency:
+  group: release-${{ inputs.tag || github.ref }}
+  cancel-in-progress: false
+
 permissions:
   contents: write
 
 jobs:
+  checks:
+    uses: ./.github/workflows/ci.yml
+
   windows:
-    runs-on: windows-latest
+    needs: checks
+    runs-on: windows-2022
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -39,11 +49,19 @@ jobs:
 
       - name: Validate release tag and app version
         id: release
+        env:
+          ENTERED_TAG: ${{ inputs.tag }}
         shell: pwsh
         run: |
           $packageVersion = (Get-Content -Raw frontend/package.json | ConvertFrom-Json).version
-          $enteredTag = '${{ inputs.tag }}'.Trim()
-          $tag = if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch' -and $enteredTag) { $enteredTag } elseif ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch') { "v$packageVersion" } else { $env:GITHUB_REF_NAME }
+          $enteredTag = if ($null -eq $env:ENTERED_TAG) { "" } else { $env:ENTERED_TAG.Trim() }
+          $tag = if ($env:GITHUB_EVENT_NAME -eq "workflow_dispatch" -and $enteredTag) {
+            $enteredTag
+          } elseif ($env:GITHUB_EVENT_NAME -eq "workflow_dispatch") {
+            "v$packageVersion"
+          } else {
+            $env:GITHUB_REF_NAME
+          }
           if ($tag -notmatch '^v(?<version>\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$') {
             throw "릴리스 태그는 v1.2.0 형식이어야 합니다: $tag"
           }
@@ -59,7 +77,29 @@ jobs:
           if ($mismatches) {
             throw "태그 $tag 와 앱 버전이 일치하지 않습니다. 모든 매니페스트를 $version 으로 맞춘 뒤 다시 실행하세요."
           }
+          $prerelease = if ($version -match "-") { "true" } else { "false" }
           "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "prerelease=$prerelease" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Import Windows code-signing certificate
+        id: codesign
+        if: ${{ secrets.WINDOWS_CERTIFICATE != '' }}
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        shell: pwsh
+        run: |
+          $pfxPath = Join-Path $env:RUNNER_TEMP "windows-codesign.pfx"
+          [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+          $secure = ConvertTo-SecureString -String $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+          $cert = Import-PfxCertificate -FilePath $pfxPath -Password $secure -CertStoreLocation Cert:\CurrentUser\My
+          $env:CERT_THUMBPRINT = $cert.Thumbprint
+          python scripts/patch_windows_signing.py
+
+      - name: Note unsigned Windows build
+        if: ${{ secrets.WINDOWS_CERTIFICATE == '' }}
+        run: echo "WINDOWS_CERTIFICATE secret is not set. The installer will be unsigned and may show SmartScreen."
 
       - name: Install Python dependencies
         run: python -m pip install -r requirements.txt pyinstaller
@@ -72,9 +112,11 @@ jobs:
         run: npm ci
 
       - name: Build and publish Windows installer
-        uses: tauri-apps/tauri-action@v1
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: frontend
           tauriScript: npm run tauri
@@ -88,5 +130,5 @@ jobs:
             1. 아래 설치 파일을 다운로드합니다.
             2. 설치 후 Anki Helper를 실행합니다.
           releaseDraft: false
-          prerelease: false
-          releaseAssetNamePattern: AnkiHelper-Setup-v[version]-Windows-x64.[ext]
+          prerelease: ${{ steps.release.outputs.prerelease == 'true' }}
+          releaseAssetNamePattern: AnkiHelper-Setup-v[version]-Windows-x64[ext]

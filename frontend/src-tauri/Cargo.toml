@@ -1,6 +1,6 @@
 [package]
 name = "anki-helper"
-version = "2.0.1"
+version = "3.0.0"
 description = "A focused workspace for Anki package design"
 authors = ["Anki Helper"]
 edition = "2021"
