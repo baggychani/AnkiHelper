@@ -7,15 +7,19 @@ import zipfile
 import json
 from importlib.util import find_spec
 from pathlib import Path
+from unittest.mock import patch
 
 from anki_helper.anki_package import (
     _safe_media_name,
     _unique_media_name,
+    _backup_source,
     _compress_anki21b,
     _decompress_anki21b,
     _encode_modern_media_index,
     _protobuf_parts,
     _read_legacy_collection,
+    ApkgReadError,
+    MAX_BACKUPS_PER_SOURCE,
     Template,
     cloze_ordinals,
     create_package_from_table,
@@ -260,6 +264,36 @@ class MediaWorkflowTests(unittest.TestCase):
         with zipfile.ZipFile(trimmed) as archive:
             self.assertEqual(b"complete audio payload", decode_media_payload(archive.read("0")))
             self.assertNotIn("1", archive.namelist())
+
+    def test_corrupt_media_index_fails_loudly_instead_of_looking_empty(self) -> None:
+        import_media(self.package, [self.asset], template_asset=True)
+        save_apkg(self.package, backup=False)
+        corrupt_source = self.root / "corrupt-media.apkg"
+        with zipfile.ZipFile(self.package.source) as source, zipfile.ZipFile(corrupt_source, "w", zipfile.ZIP_DEFLATED) as output:
+            for item in source.infolist():
+                # A JSON array (not an object) is neither a valid classic media
+                # map nor a valid modern protobuf index -- exactly the kind of
+                # corruption that used to be swallowed into an empty {}.
+                output.writestr(item, b"[1, 2, 3]" if item.filename == "media" else source.read(item.filename))
+
+        with self.assertRaises(ApkgReadError):
+            read_apkg(corrupt_source)
+
+    def test_backup_pruning_keeps_only_the_newest_per_source_deck(self) -> None:
+        backup_dir = self.root / "backups"
+        backup_dir.mkdir()
+        other_source = self.root / "other-deck.apkg"
+        other_source.write_bytes(b"stand-in bytes; copy2 does not validate apkg content")
+
+        with patch("anki_helper.anki_package._backup_dir", return_value=backup_dir):
+            unrelated_backup = _backup_source(other_source)
+            for _ in range(MAX_BACKUPS_PER_SOURCE + 5):
+                _backup_source(self.package.source)
+
+        remaining = list(backup_dir.glob(f"{self.package.source.stem}_*{self.package.source.suffix}"))
+        self.assertEqual(MAX_BACKUPS_PER_SOURCE, len(remaining))
+        # A different deck's backups are a separate family and must survive.
+        self.assertTrue(unrelated_backup.is_file())
 
     def test_new_deck_template_includes_pending_media(self) -> None:
         import_media(self.package, [self.asset], template_asset=True)

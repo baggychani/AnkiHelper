@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import glob
 import hashlib
 import html
 import io
@@ -206,6 +207,8 @@ def _read_media_map(archive: zipfile.ZipFile, entries: set[str]) -> dict[str, st
             content = _decompress_anki21b(content)
         try:
             raw = json.loads(content.decode("utf-8"))
+            if not isinstance(raw, dict):
+                raise ValueError("미디어 인덱스가 예상한 형식이 아닙니다.")
             return {str(stored): str(original) for stored, original in raw.items()}
         except (UnicodeDecodeError, json.JSONDecodeError):
             # collection.anki21b stores media metadata as protobuf. APKG media
@@ -216,8 +219,15 @@ def _read_media_map(archive: zipfile.ZipFile, entries: set[str]) -> dict[str, st
                 if name:
                     output[str(index)] = name
             return output
-    except (OSError, AttributeError, ValueError):
-        return {}
+    except (OSError, AttributeError, ValueError) as exc:
+        # A silently empty media map used to look identical to "no media in
+        # this deck": every media feature (list/health/preview) would just
+        # show zero files, and saving would overwrite the real media index
+        # with an empty one while the actual bytes sat orphaned in the zip.
+        # Fail loudly instead so a corrupted APKG never looks like a clean one.
+        raise ApkgReadError(
+            "미디어 인덱스를 읽지 못했습니다. 이 APKG의 media 파일이 손상되었을 수 있습니다."
+        ) from exc
 
 
 def _read_note_rows(connection: sqlite3.Connection) -> list[tuple[int, int, str, str]]:
@@ -483,7 +493,40 @@ def _backup_source(source: Path) -> Path:
         backup = backup_dir / f"{source.stem}_{stamp}-{counter}{source.suffix}"
         counter += 1
     shutil.copy2(source, backup)
+    _prune_old_backups(backup_dir, source)
     return backup
+
+
+MAX_BACKUPS_PER_SOURCE = 20
+_BACKUP_STAMP = re.compile(r"_(?P<stamp>\d{8}-\d{6})(?:-(?P<counter>\d+))?$")
+
+
+def _prune_old_backups(backup_dir: Path, source: Path, *, keep: int = MAX_BACKUPS_PER_SOURCE) -> None:
+    """Keep only the most recent backups for one source deck.
+
+    Every save adds a timestamped backup with no other cleanup, so a deck
+    edited often would otherwise fill the user's disk one copy at a time.
+    ``shutil.copy2`` preserves the *source* file's modified time on each
+    backup, so mtime can't tell them apart -- only the timestamp encoded in
+    each backup's own filename can, hence the bespoke sort key below.
+    """
+    prefix, suffix = f"{source.stem}_", source.suffix
+
+    def backup_key(item: Path) -> tuple[str, int] | None:
+        if not (item.name.startswith(prefix) and item.name.endswith(suffix)):
+            return None
+        stem = item.name[: len(item.name) - len(suffix)] if suffix else item.name
+        match = _BACKUP_STAMP.search(stem)
+        return (match.group("stamp"), int(match.group("counter") or 0)) if match else None
+
+    dated = [
+        (key, item)
+        for item in backup_dir.glob(f"{glob.escape(prefix)}*{glob.escape(suffix)}")
+        if item.is_file() and (key := backup_key(item)) is not None
+    ]
+    dated.sort(key=lambda pair: pair[0], reverse=True)
+    for _key, stale in dated[keep:]:
+        stale.unlink(missing_ok=True)
 
 
 def _note_checksum(value: str) -> int:

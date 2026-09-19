@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import importlib
 import io
 import os
@@ -678,6 +679,37 @@ class BackendApiTests(unittest.TestCase):
             encoded = preview.split("data:text/css;base64,", 1)[1].split('"', 1)[0]
             stylesheet_preview = __import__("base64").b64decode(encoded).decode("utf-8")
             self.assertIn("/api/preview-media/", stylesheet_preview)
+
+
+@unittest.skipUnless(API_TESTS_AVAILABLE, "FastAPI and httpx2 are required for API integration tests")
+class WorkspaceSerializationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_dispatch_serializes_overlapping_requests(self) -> None:
+        """Two overlapping requests against the shared workspace must not interleave.
+
+        Route handlers are plain ``def`` functions, so Starlette runs each one
+        in a worker thread: without the middleware's lock, a fast request
+        could start and finish while a slower one is still in flight. ``fast``
+        has zero delay here, so if the lock ever let it jump the queue,
+        "fast-start" would land before "slow-end" in ``order``.
+        """
+        order: list[str] = []
+
+        def make_call_next(label: str, delay: float):
+            async def call_next(_request):
+                order.append(f"{label}-start")
+                await asyncio.sleep(delay)
+                order.append(f"{label}-end")
+                return label
+
+            return call_next
+
+        middleware = backend.SerializeWorkspaceAccessMiddleware(app=lambda *_args: None)
+        await asyncio.gather(
+            middleware.dispatch(None, make_call_next("slow", 0.05)),
+            middleware.dispatch(None, make_call_next("fast", 0.0)),
+        )
+
+        self.assertEqual(["slow-start", "slow-end", "fast-start", "fast-end"], order)
 
 
 if __name__ == "__main__":

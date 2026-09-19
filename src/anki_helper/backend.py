@@ -7,6 +7,7 @@ the installed desktop UI and the existing APKG parsing/export domain code.
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+import asyncio
 import os
 import tempfile
 import base64
@@ -132,6 +133,29 @@ class LocalApiTokenMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 
+_workspace_lock = asyncio.Lock()
+
+
+class SerializeWorkspaceAccessMiddleware(BaseHTTPMiddleware):
+    """Process one request against the shared workspace at a time.
+
+    Route handlers below are plain ``def`` functions, so Starlette runs each
+    one in a worker thread rather than the event loop.  With exactly one
+    ``BackendState`` per app instance, two of those threads -- an in-flight
+    preview poll and a field edit landing at the same time, or two edits
+    fired back to back -- can genuinely run concurrently and race on the
+    same in-memory package (or worse, on a save that swaps it out from under
+    a request that started before the save did).  A local, single-user
+    desktop app has no real need for that concurrency, so trading a little
+    latency for removing the race entirely is the right call.
+    """
+
+    async def dispatch(self, request: Request, call_next):
+        async with _workspace_lock:
+            return await call_next(request)
+
+
+app.add_middleware(SerializeWorkspaceAccessMiddleware)
 app.add_middleware(LocalApiTokenMiddleware)
 app.add_middleware(
     CORSMiddleware,
