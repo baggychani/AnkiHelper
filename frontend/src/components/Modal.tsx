@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { useEffect, type ReactNode } from 'react'
 import { AlertTriangle, ArrowUpRight, Check, Download, LogOut, Save, Sparkles, X } from 'lucide-react'
 
 export type AvailableUpdate = { version: string; url: string }
@@ -73,7 +73,7 @@ export function UnsavedWorkModal({ onCancel, onSave, onDiscard }: { onCancel: ()
   return <div className="fixed inset-0 z-[210] grid place-items-center bg-slate-950/45 p-4 backdrop-blur-sm" onClick={onCancel}><div role="dialog" aria-modal="true" aria-label="새 작업 시작" className="w-full max-w-md rounded-[22px] border border-white/70 bg-white p-6 shadow-2xl" onClick={(event) => event.stopPropagation()}><div className="mb-4 grid h-11 w-11 place-items-center rounded-xl bg-amber-100 text-amber-700"><Save size={20} /></div><h3 className="text-lg font-semibold text-slate-900">저장하지 않은 변경이 있습니다</h3><p className="mt-2 text-sm leading-6 text-slate-500">현재 작업을 저장한 뒤 새 작업을 시작하거나, 저장하지 않고 계속할 수 있습니다.</p><div className="mt-6 flex flex-wrap justify-end gap-2"><button onClick={onCancel} className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-semibold text-slate-600">취소</button><button onClick={onDiscard} className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-semibold text-slate-700">저장하지 않고 계속</button><button onClick={onSave} className="rounded-xl bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white">저장 후 계속</button></div></div></div>
 }
 
-export function Modal({ title, description, tone = 'normal', confirmLabel, onCancel, onConfirm }: { title: string; description: string; tone?: 'normal' | 'danger'; confirmLabel: string; onCancel?: () => void; onConfirm: () => void | Promise<void> }) {
+export function Modal({ title, description, tone = 'normal', confirmLabel, onCancel, onConfirm }: { title: string; description: ReactNode; tone?: 'normal' | 'danger'; confirmLabel: string; onCancel?: () => void; onConfirm: () => void | Promise<void> }) {
   useEffect(() => {
     if (!onCancel) return
     const onKey = (event: KeyboardEvent) => {

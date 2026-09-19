@@ -5,6 +5,7 @@ import {
   Copy, Download, File, Image, Link2, Music2, Palette, Pencil, Play, Plus, ScanSearch, Trash2, Type,
 } from 'lucide-react'
 import { api, type MediaHealth, type MediaItem, type MediaReference } from '../api'
+import { Modal } from '../components/Modal'
 
 const mediaTypeLabels: Record<MediaItem['type'], string> = {
   audio: '음성',
@@ -41,6 +42,8 @@ export function MediaPage({ onExport, onExportSelected, notify }: {
   const [hoverPreview, setHoverPreview] = useState<MediaItem | null>(null)
   const [usage, setUsage] = useState<{ item: MediaItem; references: MediaReference[] } | null>(null)
   const [usageBusy, setUsageBusy] = useState(false)
+  const [deleteConfirm, setDeleteConfirm] = useState<{ targets: MediaItem[]; references: MediaReference[] } | null>(null)
+  const [deleteBusy, setDeleteBusy] = useState(false)
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const audioUrlRef = useRef<string | null>(null)
   const playbackRequestRef = useRef(0)
@@ -215,19 +218,50 @@ export function MediaPage({ onExport, onExportSelected, notify }: {
     } catch (caught) { setError(caught instanceof Error ? caught.message : '사용처를 확인하지 못했습니다.') }
     finally { setUsageBusy(false) }
   }
-  const remove = async (item: MediaItem) => {
+  const confirmRemove = async (item: MediaItem) => {
     setError('')
     try {
       const report = health ?? await api.mediaHealth()
-      const references = report.references[item.name] ?? []
-      const summary = references.length ? `\n\n현재 참조 ${references.length}곳:\n${references.slice(0, 3).map((reference) => `• ${reference.location}`).join('\n')}\n\n강제로 삭제하면 카드·디자인이 깨질 수 있습니다.` : ''
-      if (!window.confirm(`‘${item.name}’을(를) 제거할까요? 저장하면 APKG에서도 삭제됩니다.${summary}`)) return
-      const result = await api.deleteMedia(item.stored_name, references.length > 0)
+      setDeleteConfirm({ targets: [item], references: report.references[item.name] ?? [] })
+    } catch (caught) { setError(caught instanceof Error ? caught.message : '사용처를 확인하지 못했습니다.') }
+  }
+  const performDelete = async () => {
+    if (!deleteConfirm || deleteBusy) return
+    const { targets, references } = deleteConfirm
+    setDeleteBusy(true)
+    setError('')
+    try {
+      const removedNames = new Set(targets.map((item) => item.stored_name))
+      const workspace = targets.length === 1
+        ? (await api.deleteMedia(targets[0].stored_name, references.length > 0)).workspace
+        : (await api.deleteMediaFiles([...removedNames], references.length > 0)).workspace
       playbackRequestRef.current += 1; disposeAudio(); setPlaying('')
-      setItems((current) => current.filter((entry) => entry.stored_name !== item.stored_name))
+      setItems((current) => current.filter((entry) => !removedNames.has(entry.stored_name)))
+      setChecked((current) => { const next = new Set(current); removedNames.forEach((name) => next.delete(name)); return next })
       setHealth(null)
-      window.dispatchEvent(new CustomEvent('ankihelper:media-changed', { detail: { workspace: result.workspace } }))
+      setDeleteConfirm(null)
+      window.dispatchEvent(new CustomEvent('ankihelper:media-changed', { detail: { workspace } }))
+      if (targets.length > 1) notify(`${targets.length}개 파일을 제거했습니다.`)
     } catch (caught) { setError(caught instanceof Error ? caught.message : '미디어를 제거하지 못했습니다.') }
+    finally {
+      setDeleteBusy(false)
+      if (targets.length > 1) setBulkBusy(false)
+    }
+  }
+  const deleteConfirmDescription = (confirmation: { targets: MediaItem[]; references: MediaReference[] }) => {
+    const { targets, references } = confirmation
+    const base = targets.length === 1
+      ? '저장하면 APKG에서도 삭제됩니다.'
+      : `저장하면 APKG에서도 ${targets.length}개 파일이 모두 삭제됩니다.`
+    if (references.length === 0) return base
+    const preview = references.slice(0, 3).map((reference) => reference.location).join(', ')
+    const extra = references.length > 3 ? ` 외 ${references.length - 3}곳` : ''
+    return <>
+      {base}
+      <span className="mt-3 block rounded-xl bg-rose-50 px-3 py-2 text-xs leading-5 text-rose-700">
+        현재 참조 {references.length}곳: {preview}{extra}<br />강제로 삭제하면 카드·디자인이 깨질 수 있습니다.
+      </span>
+    </>
   }
   const downloadOne = async (item: MediaItem) => {
     const destination = await save({ defaultPath: item.name, filters: [{ name: '미디어 파일', extensions: [item.name.split('.').pop() || '*'] }] })
@@ -263,28 +297,25 @@ export function MediaPage({ onExport, onExportSelected, notify }: {
       return next
     })
   }
-  const removeSelected = async () => {
+  const confirmRemoveSelected = async () => {
     if (bulkBusy || checked.size === 0) return
     const targets = items.filter((item) => checked.has(item.stored_name))
     if (!targets.length) return
     setError('')
+    setBulkBusy(true)
     try {
       const report = health ?? await api.mediaHealth()
-      const referenced = targets.filter((item) => (report.references[item.name] ?? []).length > 0)
-      const summary = referenced.length
-        ? `\n\n이 중 ${referenced.length}개는 카드·디자인에서 참조 중입니다. 강제로 삭제하면 카드·디자인이 깨질 수 있습니다.`
-        : ''
-      if (!window.confirm(`선택한 ${targets.length}개 파일을 제거할까요? 저장하면 APKG에서도 삭제됩니다.${summary}`)) return
-      setBulkBusy(true)
-      const result = await api.deleteMediaFiles(targets.map((item) => item.stored_name), referenced.length > 0)
-      playbackRequestRef.current += 1; disposeAudio(); setPlaying('')
-      setItems((current) => current.filter((entry) => !checked.has(entry.stored_name)))
-      setChecked(new Set())
-      setHealth(null)
-      window.dispatchEvent(new CustomEvent('ankihelper:media-changed', { detail: { workspace: result.workspace } }))
-      notify(`${targets.length}개 파일을 제거했습니다.`)
-    } catch (caught) { setError(caught instanceof Error ? caught.message : '미디어를 제거하지 못했습니다.') }
-    finally { setBulkBusy(false) }
+      const references = targets.flatMap((item) => report.references[item.name] ?? [])
+      setDeleteConfirm({ targets, references })
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : '사용처를 확인하지 못했습니다.')
+      setBulkBusy(false)
+    }
+  }
+  const cancelDeleteConfirm = () => {
+    if (deleteBusy) return
+    if ((deleteConfirm?.targets.length ?? 0) > 1) setBulkBusy(false)
+    setDeleteConfirm(null)
   }
   const exportSelected = () => {
     if (checked.size === 0) return
@@ -331,13 +362,21 @@ export function MediaPage({ onExport, onExportSelected, notify }: {
         {checked.size > 0 && <span className="rounded-full bg-slate-100 px-2.5 py-1 font-semibold text-slate-600">{checked.size}개 선택됨</span>}
         {checked.size > 0 && <div className="ml-auto flex gap-2">
           <button disabled={bulkBusy} onClick={exportSelected} className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-1.5 font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50"><Download size={13} />선택 항목 추출</button>
-          <button disabled={bulkBusy} onClick={() => void removeSelected()} className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 font-semibold text-rose-600 hover:bg-rose-50 disabled:opacity-50"><Trash2 size={13} />선택 항목 삭제</button>
+          <button disabled={bulkBusy} onClick={() => void confirmRemoveSelected()} className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 font-semibold text-rose-600 hover:bg-rose-50 disabled:opacity-50"><Trash2 size={13} />선택 항목 삭제</button>
         </div>}
       </div>}
       {health && <div className="mb-3 shrink-0 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900"><div className="flex items-center justify-between gap-3"><b>미디어 검사 결과</b><button onClick={() => setHealth(null)} className="font-semibold text-amber-700">닫기</button></div><div className="mt-2 space-y-1 leading-5">{health.missing.length > 0 && <p>누락된 참조 {health.missing.length}개: {health.missing.slice(0, 3).map((item) => `${item.filename} (${item.location})`).join(', ')}</p>}{health.mapped_missing.length > 0 && <p>APKG 미디어 맵에만 남은 파일 {health.mapped_missing.length}개</p>}{health.unused.length > 0 && <p>노트·디자인에서 쓰이지 않는 일반 파일 {health.unused.length}개</p>}{health.static_unreferenced.length > 0 && <p>참조되지 않는 디자인용 _ 파일 {health.static_unreferenced.length}개</p>}{health.case_collisions.length > 0 && <p>대소문자 충돌 {health.case_collisions.length}개</p>}{health.unindexed_entries.length > 0 && <p>미디어 맵에 없는 APKG 항목 {health.unindexed_entries.length}개</p>}{health.missing.length + health.mapped_missing.length + health.unused.length + health.static_unreferenced.length + health.case_collisions.length + health.unindexed_entries.length === 0 && <p>누락·중복·미사용 참조를 찾지 못했습니다.</p>}</div></div>}
-      <div className="min-h-0 flex-1 overflow-y-auto rounded-xl border border-slate-200">{visible.length === 0 ? <div className="grid h-full min-h-40 place-items-center px-4 text-center text-sm text-slate-400">추가한 이미지, 음성, 영상, 폰트 파일이 여기에 표시됩니다.</div> : visible.map((item) => <div id={`media-${item.stored_name}`} key={item.stored_name} className={`flex flex-wrap items-center gap-3 border-b border-slate-100 px-4 py-3 last:border-0 transition-[background-color,box-shadow] duration-500 ${highlighted === item.stored_name ? 'bg-violet-100/90 shadow-[inset_0_0_0_2px_rgba(139,92,246,0.45)]' : ''}`}><input type="checkbox" checked={checked.has(item.stored_name)} onChange={() => toggleChecked(item.stored_name)} className="h-4 w-4 shrink-0 rounded border-slate-300" />{icon(item)}{editing === item.stored_name ? <input autoFocus value={renameDraft} disabled={renaming} onChange={(event) => setRenameDraft(event.target.value)} onBlur={() => { if (renameSkipBlur.current) { renameSkipBlur.current = false; return } void commitRename(item) }} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); event.currentTarget.blur() } else if (event.key === 'Escape') { event.preventDefault(); renameSkipBlur.current = true; setEditing(''); setRenameDraft(item.name) } }} className="min-w-0 flex-1 rounded-lg border border-indigo-300 bg-white px-2.5 py-1.5 text-sm font-medium text-slate-700 outline-none ring-2 ring-indigo-100" /> : <span className="min-w-0 flex-1 truncate text-sm font-medium" title={item.name}>{item.name}<small className="ml-2 text-xs font-normal text-slate-400">{formatSize(item.size)}</small></span>}{item.type === 'audio' && <button onClick={() => play(item)} className={`inline-flex h-9 items-center gap-2 rounded-lg px-3 text-xs font-semibold ${playing === item.stored_name ? 'bg-violet-600 text-white' : 'bg-violet-50 text-violet-700'}`}>{playing === item.stored_name ? '■ 정지' : '▶ 듣기'}</button>}{item.type === 'video' && <button onClick={() => setVideo(item)} className="inline-flex h-9 items-center gap-2 rounded-lg bg-rose-50 px-3 text-xs font-semibold text-rose-700"><Play size={14} />미리보기</button>}<button title="사용처 보기" disabled={usageBusy} onClick={() => void showUsage(item)} className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-50 hover:text-slate-700 disabled:opacity-50"><Link2 size={15} /></button><button title={copyLabel(item)} onClick={() => void copyReference(item)} className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-50 hover:text-slate-700"><Copy size={15} /></button><button title="파일명 수정" onClick={() => beginRename(item)} className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-50 hover:text-slate-700"><Pencil size={15} /></button><button title="저장" onClick={() => void downloadOne(item)} className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-50 hover:text-slate-700"><Download size={15} /></button><button onClick={() => void remove(item)} className="inline-flex h-9 items-center gap-2 rounded-lg px-3 text-xs font-semibold text-rose-600 hover:bg-rose-50"><Trash2 size={14} />삭제</button></div>)}</div>
+      <div className="min-h-0 flex-1 overflow-y-auto rounded-xl border border-slate-200">{visible.length === 0 ? <div className="grid h-full min-h-40 place-items-center px-4 text-center text-sm text-slate-400">추가한 이미지, 음성, 영상, 폰트 파일이 여기에 표시됩니다.</div> : visible.map((item) => <div id={`media-${item.stored_name}`} key={item.stored_name} className={`flex flex-wrap items-center gap-3 border-b border-slate-100 px-4 py-3 last:border-0 transition-[background-color,box-shadow] duration-500 ${highlighted === item.stored_name ? 'bg-violet-100/90 shadow-[inset_0_0_0_2px_rgba(139,92,246,0.45)]' : ''}`}><input type="checkbox" checked={checked.has(item.stored_name)} onChange={() => toggleChecked(item.stored_name)} className="h-4 w-4 shrink-0 rounded border-slate-300" />{icon(item)}{editing === item.stored_name ? <input autoFocus value={renameDraft} disabled={renaming} onChange={(event) => setRenameDraft(event.target.value)} onBlur={() => { if (renameSkipBlur.current) { renameSkipBlur.current = false; return } void commitRename(item) }} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); event.currentTarget.blur() } else if (event.key === 'Escape') { event.preventDefault(); renameSkipBlur.current = true; setEditing(''); setRenameDraft(item.name) } }} className="min-w-0 flex-1 rounded-lg border border-indigo-300 bg-white px-2.5 py-1.5 text-sm font-medium text-slate-700 outline-none ring-2 ring-indigo-100" /> : <span className="min-w-0 flex-1 truncate text-sm font-medium" title={item.name}>{item.name}<small className="ml-2 text-xs font-normal text-slate-400">{formatSize(item.size)}</small></span>}{item.type === 'audio' && <button onClick={() => play(item)} className={`inline-flex h-9 items-center gap-2 rounded-lg px-3 text-xs font-semibold ${playing === item.stored_name ? 'bg-violet-600 text-white' : 'bg-violet-50 text-violet-700'}`}>{playing === item.stored_name ? '■ 정지' : '▶ 듣기'}</button>}{item.type === 'video' && <button onClick={() => setVideo(item)} className="inline-flex h-9 items-center gap-2 rounded-lg bg-rose-50 px-3 text-xs font-semibold text-rose-700"><Play size={14} />미리보기</button>}<button title="사용처 보기" disabled={usageBusy} onClick={() => void showUsage(item)} className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-50 hover:text-slate-700 disabled:opacity-50"><Link2 size={15} /></button><button title={copyLabel(item)} onClick={() => void copyReference(item)} className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-50 hover:text-slate-700"><Copy size={15} /></button><button title="파일명 수정" onClick={() => beginRename(item)} className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-50 hover:text-slate-700"><Pencil size={15} /></button><button title="저장" onClick={() => void downloadOne(item)} className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-50 hover:text-slate-700"><Download size={15} /></button><button onClick={() => void confirmRemove(item)} className="inline-flex h-9 items-center gap-2 rounded-lg px-3 text-xs font-semibold text-rose-600 hover:bg-rose-50"><Trash2 size={14} />삭제</button></div>)}</div>
     </section>
     {video && <div className="fixed inset-0 z-[220] grid place-items-center bg-slate-950/60 p-4" onClick={() => setVideo(null)}><div className="w-full max-w-3xl rounded-2xl bg-white p-4 shadow-2xl" onClick={(event) => event.stopPropagation()}><div className="mb-3 flex items-center justify-between gap-3"><b className="truncate">{video.name}</b><button onClick={() => setVideo(null)} className="rounded-lg border px-3 py-1.5 text-xs font-semibold">닫기</button></div><video src={api.mediaUrl(video.stored_name)} controls autoPlay className="max-h-[70vh] w-full rounded-xl bg-slate-950" /></div></div>}
+    {deleteConfirm && <Modal
+      title={deleteConfirm.targets.length === 1 ? `'${deleteConfirm.targets[0].name}'을(를) 제거할까요?` : `선택한 ${deleteConfirm.targets.length}개 파일을 제거할까요?`}
+      description={deleteConfirmDescription(deleteConfirm)}
+      tone="danger"
+      confirmLabel={deleteBusy ? '삭제 중…' : '삭제'}
+      onCancel={deleteBusy ? undefined : cancelDeleteConfirm}
+      onConfirm={() => void performDelete()}
+    />}
     {usage && (() => {
       const cardSides = new Map<string, { front: boolean; back: boolean }>()
       const otherRefs: MediaReference[] = []
