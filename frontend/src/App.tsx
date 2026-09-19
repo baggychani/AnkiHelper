@@ -16,6 +16,7 @@ import { SideAction } from './components/SideAction'
 import { SpreadsheetImportWizard } from './components/SpreadsheetImportWizard'
 import { Welcome } from './components/Welcome'
 import { designDraftSavedValue, designDraftsArePending, parseDesignDraftKey } from './designDrafts'
+import { isNewerVersion } from './version'
 import { DataPage } from './pages/DataPage'
 import { DesignPage } from './pages/DesignPage'
 import { FieldsPage } from './pages/FieldsPage'
@@ -31,18 +32,6 @@ type PendingWork = { kind: 'open-picker' | 'table-picker' | 'open-path'; path?: 
 const UPDATE_CHECK_INTERVAL_MS = 12 * 60 * 60 * 1000
 const UPDATE_CHECK_STORAGE_KEY = 'anki-helper:update-last-check'
 const RELEASES_API_URL = 'https://api.github.com/repos/baggychani/AnkiHelper/releases/latest'
-
-function isNewerVersion(candidate: string, current: string) {
-  const toParts = (version: string) => version.replace(/^v/i, '').split(/[+-]/, 1)[0].split('.').map((part) => Number.parseInt(part, 10) || 0)
-  const candidateParts = toParts(candidate)
-  const currentParts = toParts(current)
-  const total = Math.max(candidateParts.length, currentParts.length)
-  for (let index = 0; index < total; index += 1) {
-    const difference = (candidateParts[index] ?? 0) - (currentParts[index] ?? 0)
-    if (difference !== 0) return difference > 0
-  }
-  return false
-}
 
 const navItems = [
   ['overview', '개요', Grid2X2], ['data', '카드 데이터', Table2],
