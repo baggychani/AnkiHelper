@@ -11,11 +11,13 @@ import {
   Play, Plus, Save, Table2,
 } from 'lucide-react'
 import { api, type MediaKind, type TablePreview, type Workspace } from './api'
+import { DesignExportMissingDialog, DesignMediaConflictDialog } from './components/DesignFileDialogs'
+import { FieldLinkDialog } from './components/FieldLinkDialog'
 import { ExitConfirmModal, Modal, UnsavedWorkModal, UpdateAvailableModal, type AvailableUpdate } from './components/Modal'
 import { SideAction } from './components/SideAction'
 import { SpreadsheetImportWizard } from './components/SpreadsheetImportWizard'
 import { Welcome } from './components/Welcome'
-import { designDraftSavedValue, designDraftsArePending, parseDesignDraftKey } from './designDrafts'
+import { designDraftSavedValue, designDraftsArePending, parseDesignDraftKey, renameDesignDraftMedia, type MediaChangedDetail } from './designDrafts'
 import { isNewerVersion } from './version'
 import { DataPage } from './pages/DataPage'
 import { DesignPage } from './pages/DesignPage'
@@ -61,6 +63,8 @@ function App() {
   const [pendingWork, setPendingWork] = useState<PendingWork | null>(null)
   const [newWorkMenuOpen, setNewWorkMenuOpen] = useState(false)
   const [availableUpdate, setAvailableUpdate] = useState<AvailableUpdate | null>(null)
+  const [designExportMissing, setDesignExportMissing] = useState<string[] | null>(null)
+  const [designImport, setDesignImport] = useState<{ path: string; fields: string[]; conflicts: string[]; step: 'map' | 'conflict'; mapping: Record<string, string> } | null>(null)
   const allowCloseRef = useRef(false)
   const newWorkMenuRef = useRef<HTMLDivElement | null>(null)
 
@@ -156,17 +160,6 @@ function App() {
     }
   }, [])
 
-  useEffect(() => {
-    if (!exitPrompt) return
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        event.preventDefault()
-        setExitPrompt(false)
-      }
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [exitPrompt])
 
   useEffect(() => {
     if (!newWorkMenuOpen) return
@@ -204,7 +197,11 @@ function App() {
   }, [hydrate, notify])
   useEffect(() => {
     const mediaChanged = (event: Event) => {
-      const detail = (event as CustomEvent<{ workspace: Workspace } | Workspace>).detail
+      const detail = (event as CustomEvent<MediaChangedDetail>).detail
+      if ('rename' in detail && detail.rename) {
+        const { old: oldName, new: newName } = detail.rename
+        setDesignDrafts((current) => renameDesignDraftMedia(current, oldName, newName))
+      }
       hydrate(detail && typeof detail === 'object' && 'workspace' in detail ? detail.workspace : detail)
       setDirty(true)
     }
@@ -253,18 +250,24 @@ function App() {
     setBusy(true); setError('')
     try {
       let nextWorkspace = workspace
+      const appliedDrafts = new Map<string, string>()
       for (const [key, draftValue] of Object.entries(designDrafts)) {
         const parsed = parseDesignDraftKey(key)
         if (!parsed) continue
         const noteType = nextWorkspace.note_types.find((item) => item.id === parsed.noteTypeId)
         if (!noteType) continue
-        if (draftValue === designDraftSavedValue(noteType, parsed.index, parsed.mode)) continue
-        nextWorkspace = parsed.mode === 'css'
-          ? await api.updateCss(parsed.noteTypeId, draftValue)
-          : await api.updateTemplate(parsed.noteTypeId, parsed.index, { [parsed.mode]: draftValue })
+        if (draftValue !== designDraftSavedValue(noteType, parsed.index, parsed.mode)) {
+          nextWorkspace = parsed.mode === 'css'
+            ? await api.updateCss(parsed.noteTypeId, draftValue)
+            : await api.updateTemplate(parsed.noteTypeId, parsed.index, { [parsed.mode]: draftValue })
+        }
+        appliedDrafts.set(key, draftValue)
       }
       hydrate(nextWorkspace)
-      setDesignDrafts({})
+      // A file save applies this snapshot, not edits typed while it was pending.
+      setDesignDrafts((current) => Object.fromEntries(
+        Object.entries(current).filter(([key, value]) => !appliedDrafts.has(key) || appliedDrafts.get(key) !== value),
+      ))
       setDirty(true)
       return true
     } catch (caught) {
@@ -307,6 +310,64 @@ function App() {
       await writeFile(destination, new Uint8Array(await response.arrayBuffer()))
       notify(`${details[2]} 파일을 저장했습니다.`)
     } catch (caught) { setError(caught instanceof Error ? caught.message : '파일을 저장하지 못했습니다.') }
+  }
+
+  const finishAnkiDesignExport = async () => {
+    if (!selected) return
+    setDesignExportMissing(null)
+    const destination = await save({ defaultPath: `${selected.name.replace(/[\\/:*?"<>|]/g, '_')}.ankidesign`, filters: [{ name: 'Anki Helper 디자인', extensions: ['ankidesign'] }] })
+    if (!destination) return
+    try {
+      const response = await fetch(api.ankidesignExportUrl(selected.id))
+      if (!response.ok) throw new Error('디자인 파일을 만들지 못했습니다.')
+      await writeFile(destination, new Uint8Array(await response.arrayBuffer()))
+      notify('디자인 파일을 저장했습니다.')
+    } catch (caught) { setError(caught instanceof Error ? caught.message : '디자인 파일을 저장하지 못했습니다.') }
+  }
+
+  const exportAnkiDesign = async () => {
+    if (!selected || !workspace) return
+    if (designDraftsArePending(designDrafts, workspace) && !(await flushDesignDrafts())) return
+    try {
+      const preview = await api.ankidesignPreview(selected.id)
+      if (preview.missing.length) { setDesignExportMissing(preview.missing); return }
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : '디자인 파일을 확인하지 못했습니다.')
+      return
+    }
+    await finishAnkiDesignExport()
+  }
+
+  const applyImportedDesign = async (path: string, mapping: Record<string, string>, overwrite: boolean) => {
+    if (!selected) return
+    const noteTypeId = selected.id
+    setDesignImport(null)
+    try {
+      const next = await api.applyAnkiDesign(noteTypeId, path, mapping, overwrite)
+      hydrate(next)
+      setDirty(true)
+      setDesignDrafts((current) => Object.fromEntries(Object.entries(current).filter(([key]) => parseDesignDraftKey(key)?.noteTypeId !== noteTypeId)))
+      const count = next.note_types.find((item) => item.id === noteTypeId)?.templates.length ?? 1
+      setTemplateIndex((current) => current < count ? current : 0)
+      notify('디자인을 가져왔습니다.')
+    } catch (caught) { setError(caught instanceof Error ? caught.message : '디자인을 가져오지 못했습니다.') }
+  }
+
+  const importAnkiDesign = async () => {
+    if (!selected || !workspace) return
+    if (designDraftsArePending(designDrafts, workspace) && !(await flushDesignDrafts())) return
+    const picked = await open({ multiple: false, filters: [{ name: 'Anki Helper 디자인', extensions: ['ankidesign'] }] })
+    if (typeof picked !== 'string') return
+    try {
+      const inspected = await api.inspectAnkiDesign(selected.id, picked)
+      const mapping = Object.fromEntries(inspected.fields.filter((name) => inspected.current_fields.includes(name)).map((name) => [name, name]))
+      const needsMap = inspected.fields.some((name) => !inspected.current_fields.includes(name))
+      if (!needsMap && inspected.conflicts.length === 0) {
+        await applyImportedDesign(picked, mapping, false)
+        return
+      }
+      setDesignImport({ path: picked, fields: inspected.fields, conflicts: inspected.conflicts, step: needsMap ? 'map' : 'conflict', mapping })
+    } catch (caught) { setError(caught instanceof Error ? caught.message : '디자인 파일을 읽지 못했습니다.') }
   }
 
   const mutate = async (operation: () => Promise<Workspace>, success?: string) => {
@@ -464,7 +525,7 @@ function App() {
           </div>
           <div className="flex shrink-0 items-center gap-2">{workspace && <><button onClick={() => void saveAll()} disabled={busy || !unsavedWork} className={`inline-flex h-9 items-center gap-2 rounded-xl px-3 text-xs font-semibold transition lg:h-10 lg:px-4 ${unsavedWork ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-500/20' : 'border border-slate-200 bg-white text-slate-400'}`}>{busy ? <LoaderCircle className="animate-spin" size={16} /> : <Save size={16} />}{unsavedWork ? '저장' : '저장됨'}<span className="hidden text-[10px] opacity-65 lg:inline">Ctrl+S</span></button><div ref={newWorkMenuRef} className="relative"><button onClick={() => setNewWorkMenuOpen((open) => !open)} disabled={busy} className="inline-flex h-9 items-center gap-2 rounded-xl bg-[#11182a] px-3 text-xs font-semibold text-white transition hover:bg-[#202b45] lg:h-10 lg:px-4"><Plus size={16} /><span>새 작업</span><ChevronDown size={14} className={`transition ${newWorkMenuOpen ? 'rotate-180' : ''}`} /></button>{newWorkMenuOpen && <div className="absolute right-0 top-[calc(100%+8px)] z-[75] w-64 overflow-hidden rounded-2xl border border-slate-200 bg-white p-1.5 shadow-xl"><button onClick={() => { setNewWorkMenuOpen(false); requestTableImport() }} className="flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left transition hover:bg-indigo-50"><span className="grid h-9 w-9 place-items-center rounded-lg bg-indigo-100 text-indigo-600"><FileSpreadsheet size={17} /></span><span><b className="block text-sm text-slate-800">표 데이터에서 새 덱 만들기</b><small className="block pt-0.5 text-xs text-slate-500">Excel · CSV · TSV · TXT</small></span></button><button onClick={() => { setNewWorkMenuOpen(false); choosePackage() }} className="flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left transition hover:bg-slate-50"><span className="grid h-9 w-9 place-items-center rounded-lg bg-slate-100 text-slate-600"><FolderOpen size={17} /></span><span><b className="block text-sm text-slate-800">기존 파일 불러오기</b><small className="block pt-0.5 text-xs text-slate-500">APKG · 편집 프로젝트</small></span></button></div>}</div></>}</div>
         </header>
-        <div className={`min-h-0 flex-1 px-3 ${page === 'preview' ? 'pb-0' : 'pb-4'} ${!workspace || page === 'design' || page === 'media' || page === 'preview' ? 'overflow-hidden' : 'overflow-y-auto'}`}>{!workspace ? <Welcome onOpen={choosePackage} busy={busy} dragActive={dragActive} /> : page === 'overview' ? <OverviewPage workspace={workspace} selected={selected} onPage={setPage} onSelect={(id) => { void selectNoteType(id) }} onDeleteNoteType={(id) => mutate(() => api.deleteNoteType(id), '빈 노트 유형을 제거했습니다. 저장하면 APKG에 반영됩니다.')} onMoveNotes={async (fromId, toId, mapping) => { try { const result = await api.moveNotes(fromId, toId, mapping); hydrate(result.workspace); setDirty(true); notify(`${result.moved.toLocaleString()}개 카드를 옮겼습니다.`); } catch (caught) { setError(caught instanceof Error ? caught.message : '카드를 옮기지 못했습니다.'); throw caught } }} /> : page === 'data' ? <DataPage noteType={selected} onUpdate={updateCell} /> : page === 'fields' ? <FieldsPage noteType={selected} onRename={async (order, name) => { await mutate(() => api.updateField(selected!.id, order, name)) }} onAdd={async (name) => { await mutate(() => api.addField(selected!.id, name)) }} onDelete={async (order) => { await mutate(() => api.deleteField(selected!.id, order)) }} onReorder={async (order, newOrder) => { await mutate(() => api.reorderField(selected!.id, order, newOrder)) }} onMove={async (order, destination, mode) => { const result = await api.moveFieldContents(selected!.id, order, destination, mode); hydrate(result.workspace); setDirty(true); notify(`${result.changed.toLocaleString()}개 노트에서 내용을 이동했습니다.`); return result.changed }} onClone={async (name) => { await mutate(async () => { const next = await api.cloneNoteType(selected!.id, name, true); setPage('overview'); return next }, '카드를 새 노트 유형으로 옮겼습니다. 저장하면 APKG에 반영됩니다.') }} /> : page === 'media' ? <MediaPage onExport={(mediaType) => exportFile('media', mediaType)} onExportSelected={(storedNames) => exportFile('media', undefined, storedNames)} notify={notify} /> : page === 'design' ? <DesignPage noteType={selected} index={templateIndex} setIndex={setTemplateIndex} drafts={designDrafts} setDrafts={setDesignDrafts} onSave={async (mode, value) => { await mutate(() => mode === 'css' ? api.updateCss(selected!.id, value) : api.updateTemplate(selected!.id, templateIndex, { [mode]: value }), '카드 디자인을 적용했습니다.') }} notify={notify} /> : <PreviewPage noteType={selected} templateIndex={templateIndex} previewState={previewState} previewHtml={activePreviewHtml} onSide={(side) => dispatchPreview({ type: 'select-side', side })} onNavigate={(delta) => dispatchPreview({ type: 'navigate', delta, total: selected?.notes.length ?? 0 })} clozeCards={clozeCards} onCloze={(ordinal) => dispatchPreview({ type: 'select-cloze', ordinal })} />}</div>
+        <div className={`min-h-0 flex-1 px-3 ${page === 'preview' ? 'pb-0' : 'pb-4'} ${!workspace || page === 'design' || page === 'media' || page === 'preview' ? 'overflow-hidden' : 'overflow-y-auto'}`}>{!workspace ? <Welcome onOpen={choosePackage} busy={busy} dragActive={dragActive} /> : page === 'overview' ? <OverviewPage workspace={workspace} selected={selected} onPage={setPage} onSelect={(id) => { void selectNoteType(id) }} onDeleteNoteType={(id) => mutate(() => api.deleteNoteType(id), '빈 노트 유형을 제거했습니다. 저장하면 APKG에 반영됩니다.')} onMoveNotes={async (fromId, toId, mapping) => { try { const result = await api.moveNotes(fromId, toId, mapping); hydrate(result.workspace); setDirty(true); notify(`${result.moved.toLocaleString()}개 카드를 옮겼습니다.`); } catch (caught) { setError(caught instanceof Error ? caught.message : '카드를 옮기지 못했습니다.'); throw caught } }} /> : page === 'data' ? <DataPage noteType={selected} onUpdate={updateCell} /> : page === 'fields' ? <FieldsPage noteType={selected} onRename={async (order, name) => { await mutate(() => api.updateField(selected!.id, order, name)) }} onAdd={async (name) => { await mutate(() => api.addField(selected!.id, name)) }} onDelete={async (order) => { await mutate(() => api.deleteField(selected!.id, order)) }} onReorder={async (order, newOrder) => { await mutate(() => api.reorderField(selected!.id, order, newOrder)) }} onMove={async (order, destination, mode) => { const result = await api.moveFieldContents(selected!.id, order, destination, mode); hydrate(result.workspace); setDirty(true); notify(`${result.changed.toLocaleString()}개 노트에서 내용을 이동했습니다.`); return result.changed }} onClone={async (name) => { await mutate(async () => { const next = await api.cloneNoteType(selected!.id, name, true); setPage('overview'); return next }, '카드를 새 노트 유형으로 옮겼습니다. 저장하면 APKG에 반영됩니다.') }} /> : page === 'media' ? <MediaPage onExport={(mediaType) => exportFile('media', mediaType)} onExportSelected={(storedNames) => exportFile('media', undefined, storedNames)} notify={notify} /> : page === 'design' ? <DesignPage noteType={selected} index={templateIndex} setIndex={setTemplateIndex} drafts={designDrafts} setDrafts={setDesignDrafts} onSave={(mode, value) => mutate(() => mode === 'css' ? api.updateCss(selected!.id, value) : api.updateTemplate(selected!.id, templateIndex, { [mode]: value }), '카드 디자인을 적용했습니다.')} onExportDesign={() => void exportAnkiDesign()} onImportDesign={() => void importAnkiDesign()} notify={notify} /> : <PreviewPage noteType={selected} templateIndex={templateIndex} previewState={previewState} previewHtml={activePreviewHtml} onSide={(side) => dispatchPreview({ type: 'select-side', side })} onNavigate={(delta) => dispatchPreview({ type: 'navigate', delta, total: selected?.notes.length ?? 0 })} clozeCards={clozeCards} onCloze={(ordinal) => dispatchPreview({ type: 'select-cloze', ordinal })} />}</div>
       </section>
     </div>
     {toast && <div className={`fixed bottom-7 left-1/2 z-[70] -translate-x-1/2 rounded-xl bg-[#0b1426] px-5 py-3 text-sm font-semibold text-white shadow-2xl ring-1 ring-white/10 transition-opacity duration-300 ${toastVisible ? 'opacity-100' : 'opacity-0'}`}><span className="mr-2 text-emerald-400">✓</span>{toast}</div>}
@@ -473,6 +534,9 @@ function App() {
     {tableImport && <SpreadsheetImportWizard initial={tableImport.preview} onCancel={() => setTableImport(null)} onSheetChange={(sheet) => api.inspectTable(tableImport.path, sheet)} onCreate={async (payload) => { setBusy(true); setError(''); try { hydrate(await api.createFromTable({ path: tableImport.path, ...payload })); setDirty(true); setPage('overview'); setTableImport(null); notify('새 덱 초안을 만들었습니다. 저장 위치를 선택해 주세요.'); } catch (caught) { setError(caught instanceof Error ? caught.message : '새 덱을 만들지 못했습니다.'); } finally { setBusy(false); } }} />}
     {availableUpdate && !error && !pendingWork && !tableImport && !exitPrompt && <UpdateAvailableModal update={availableUpdate} onDismiss={() => setAvailableUpdate(null)} onOpen={async () => { setAvailableUpdate(null); try { await openUrl(availableUpdate.url) } catch { setError('업데이트 페이지를 열지 못했습니다. 인터넷 연결을 확인한 뒤 다시 시도해 주세요.') } }} />}
     {exitPrompt && <ExitConfirmModal dirty={unsavedWork} onCancel={() => setExitPrompt(false)} onConfirm={() => void confirmExit()} />}
+    {designExportMissing && <DesignExportMissingDialog names={designExportMissing} onCancel={() => setDesignExportMissing(null)} onContinue={() => void finishAnkiDesignExport()} />}
+    {designImport?.step === 'map' && <FieldLinkDialog sources={designImport.fields} destinations={selected?.fields.map((field) => field.name) ?? []} onCancel={() => setDesignImport(null)} onApply={(mapping) => { if (designImport.conflicts.length) setDesignImport({ ...designImport, step: 'conflict', mapping }); else void applyImportedDesign(designImport.path, mapping, false) }} />}
+    {designImport?.step === 'conflict' && <DesignMediaConflictDialog names={designImport.conflicts} onCancel={() => setDesignImport(null)} onKeep={() => void applyImportedDesign(designImport.path, designImport.mapping, false)} onOverwrite={() => void applyImportedDesign(designImport.path, designImport.mapping, true)} />}
   </main>
 }
 

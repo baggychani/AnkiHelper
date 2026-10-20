@@ -59,6 +59,22 @@ jobs:
         working-directory: frontend
         run: npm test
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install preview fixture dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Install browser for preview tests
+        working-directory: frontend
+        run: npx playwright install chromium
+
+      - name: Test preview JavaScript in Chromium
+        working-directory: frontend
+        run: npm run test:browser
+
   rust:
     runs-on: windows-2022
     steps:

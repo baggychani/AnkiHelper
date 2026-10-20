@@ -13,6 +13,8 @@ from anki_helper.anki_package import (
     _safe_media_name,
     _unique_media_name,
     _backup_source,
+    _backup_prefix,
+    _prune_old_backups,
     _compress_anki21b,
     _decompress_anki21b,
     _encode_modern_media_index,
@@ -279,6 +281,67 @@ class MediaWorkflowTests(unittest.TestCase):
         with self.assertRaises(ApkgReadError):
             read_apkg(corrupt_source)
 
+    def test_invalid_media_indexes_are_rejected_without_changing_the_source(self) -> None:
+        import_media(self.package, [self.asset])
+        save_apkg(self.package, backup=False)
+        with zipfile.ZipFile(self.package.source) as archive:
+            database = archive.read("collection.anki2")
+            payload = archive.read("0")
+        cases = [
+            (False, b'{"0":"badge.svg"'),  # truncated JSON
+            (False, b'{"0":null}'),
+            (False, b'{}'),  # payload exists, but its index was emptied
+            (False, None),
+            (True, b'\x0a\x09\x0a\x07badge'),  # truncated protobuf payload
+            (True, b'\x0f'),  # unsupported wire type
+            (True, b'\x00'),  # field zero
+            (True, b'\x0a\x02\x10\x01'),  # entry without a filename
+            (True, b'\x0a\x03\x0a\x01\xff'),  # invalid UTF-8 filename
+        ]
+        for modern, index in cases:
+            with self.subTest(modern=modern, index=index):
+                path = self.root / "invalid.apkg"
+                with zipfile.ZipFile(path, "w") as archive:
+                    archive.writestr("collection.anki21b" if modern else "collection.anki2",
+                                     _compress_anki21b(database) if modern else database)
+                    if index is not None:
+                        archive.writestr("media", _compress_anki21b(index) if modern else index)
+                    archive.writestr("0", payload)
+                before = path.read_bytes()
+                with self.assertRaises(ApkgReadError):
+                    read_apkg(path)
+                self.assertEqual(before, path.read_bytes())
+
+    def test_modern_media_rename_survives_save_without_additions_or_deletions(self) -> None:
+        import_media(self.package, [self.asset])
+        self.package.note_types[0].notes[0][0] = '<img src="badge.svg">'
+        save_apkg(self.package, backup=False)
+        modern = self.root / "rename.apkg"
+        with zipfile.ZipFile(self.package.source) as source, zipfile.ZipFile(modern, "w") as archive:
+            payload = source.read("0")
+            archive.writestr("collection.anki21b", _compress_anki21b(source.read("collection.anki2")))
+            archive.writestr("media", _compress_anki21b(_encode_modern_media_index([("badge.svg", payload)])))
+            archive.writestr("0", _compress_anki21b(payload))
+        package = read_apkg(modern)
+        rename_media(package, "0", "renamed.svg")
+        save_apkg(package, backup=False)
+        reopened = read_apkg(modern)
+        self.assertEqual({"0": "renamed.svg"}, reopened.media)
+        self.assertEqual('<img src="renamed.svg">', reopened.note_types[0].notes[0][0])
+        self.assertEqual([], media_health(reopened)["missing"])
+        with zipfile.ZipFile(modern) as archive:
+            self.assertEqual(payload, decode_media_payload(archive.read("0")))
+            index = archive.read("media")
+        save_apkg(reopened, backup=False)
+        with zipfile.ZipFile(modern) as archive:
+            self.assertEqual(index, archive.read("media"))
+
+    def test_protobuf_parser_rejects_truncated_and_overflowing_fields(self) -> None:
+        for blob in (b'\x09\x00', b'\x0d\x00', b'\x0a\x05abc', b'\x08' + b'\x80' * 10, b'\x08' + b'\xff' * 9 + b'\x02'):
+            with self.subTest(blob=blob), self.assertRaises(ValueError):
+                _protobuf_parts(blob)
+        self.assertEqual({1: [b'abc']}, _protobuf_parts(b'\x10\x01\x0a\x03abc'))
+
     def test_backup_pruning_keeps_only_the_newest_per_source_deck(self) -> None:
         backup_dir = self.root / "backups"
         backup_dir.mkdir()
@@ -294,6 +357,37 @@ class MediaWorkflowTests(unittest.TestCase):
         self.assertEqual(MAX_BACKUPS_PER_SOURCE, len(remaining))
         # A different deck's backups are a separate family and must survive.
         self.assertTrue(unrelated_backup.is_file())
+
+    def test_backup_pruning_preserves_other_paths_prefixes_and_legacy_backups(self) -> None:
+        backup_dir = self.root / "backups"
+        backup_dir.mkdir()
+        source = self.root / "Deck.apkg"
+        source.write_bytes(b"current deck")
+        other_dir = self.root / "other"
+        other_dir.mkdir()
+        unrelated = [other_dir / "Deck.apkg", self.root / "Deck_extra.apkg"]
+        for path in unrelated:
+            path.write_bytes(b"other deck")
+        legacy = backup_dir / "Deck_20260901-000000.apkg"
+        legacy.write_bytes(b"legacy backup of unknown source")
+        with patch("anki_helper.anki_package._backup_dir", return_value=backup_dir):
+            protected = [_backup_source(path) for path in unrelated]
+            for _ in range(MAX_BACKUPS_PER_SOURCE + 5):
+                _backup_source(source)
+        self.assertTrue(all(path.is_file() for path in [legacy, *protected]))
+        self.assertEqual(MAX_BACKUPS_PER_SOURCE, len(list(backup_dir.glob(f"{_backup_prefix(source)}*"))))
+
+    def test_backup_pruning_uses_numeric_counters_and_exact_names(self) -> None:
+        backup_dir = self.root / "backups"
+        backup_dir.mkdir()
+        prefix = _backup_prefix(self.package.source)
+        for counter in range(1, 13):
+            (backup_dir / f"{prefix}20260920-010101-{counter}.apkg").write_bytes(b"backup")
+        unrelated = backup_dir / f"{prefix}extra_20260920-010101.apkg"
+        unrelated.write_bytes(b"keep")
+        _prune_old_backups(backup_dir, self.package.source, keep=2)
+        self.assertEqual({unrelated.name, f"{prefix}20260920-010101-11.apkg", f"{prefix}20260920-010101-12.apkg"},
+                         {path.name for path in backup_dir.iterdir()})
 
     def test_new_deck_template_includes_pending_media(self) -> None:
         import_media(self.package, [self.asset], template_asset=True)

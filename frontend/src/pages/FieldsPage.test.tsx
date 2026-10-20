@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
@@ -34,6 +34,61 @@ const noop = {
 afterEach(() => {
   cleanup()
   vi.clearAllMocks()
+})
+
+const occupiedSummary = {
+  field_order: 0, filled: 2, text_only: 0, media_only: 0, mixed: 2, has_mixed: true,
+  destination_filled: { '1': 2 }, sample_text: 'question', sample_media: '[sound:q.mp3]',
+}
+
+it('blocks moves until the summary is loaded and then preserves payload and merge confirmation', async () => {
+  let finish!: (value: typeof occupiedSummary) => void
+  vi.mocked(api.fieldContentSummary).mockImplementationOnce(() => new Promise((resolve) => { finish = resolve }))
+  const user = userEvent.setup()
+  const onMove = vi.fn().mockResolvedValue(2)
+  render(<FieldsPage noteType={noteType} {...noop} onMove={onMove} />)
+  await user.click(screen.getAllByTitle('내용 이동')[0])
+  const destination = screen.getByRole('button', { name: /Back.*확인 필요/ }) as HTMLButtonElement
+  expect(destination.disabled).toBe(true)
+  await user.click(destination)
+  expect(onMove).not.toHaveBeenCalled()
+  await act(async () => finish(occupiedSummary))
+  await user.click(screen.getByRole('button', { name: /Back.*기존 내용 있음/ }))
+  await user.click(screen.getByRole('button', { name: /미디어만/ }))
+  expect(onMove).not.toHaveBeenCalled()
+  await user.click(screen.getByRole('button', { name: '이어 붙이며 이동' }))
+  expect(onMove).toHaveBeenCalledWith(0, 1, 'media')
+})
+
+it('keeps destinations disabled after a summary failure and supports retry', async () => {
+  vi.mocked(api.fieldContentSummary).mockRejectedValueOnce(new Error('offline')).mockResolvedValueOnce(occupiedSummary)
+  const user = userEvent.setup()
+  const onMove = vi.fn()
+  render(<FieldsPage noteType={noteType} {...noop} onMove={onMove} />)
+  await user.click(screen.getAllByTitle('내용 이동')[0])
+  await screen.findByRole('alert')
+  expect((screen.getByRole('button', { name: /Back.*확인 필요/ }) as HTMLButtonElement).disabled).toBe(true)
+  expect(onMove).not.toHaveBeenCalled()
+  await user.click(screen.getByRole('button', { name: '다시 시도' }))
+  await screen.findByRole('button', { name: /Back.*기존 내용 있음/ })
+  expect(screen.queryByRole('alert')).toBeNull()
+})
+
+it('ignores a previous summary after cancelling and reopening the move dialog', async () => {
+  let finishOld!: (value: typeof occupiedSummary) => void
+  let finishNew!: (value: typeof occupiedSummary) => void
+  vi.mocked(api.fieldContentSummary)
+    .mockImplementationOnce(() => new Promise((resolve) => { finishOld = resolve }))
+    .mockImplementationOnce(() => new Promise((resolve) => { finishNew = resolve }))
+  const user = userEvent.setup()
+  render(<FieldsPage noteType={noteType} {...noop} />)
+  await user.click(screen.getAllByTitle('내용 이동')[0])
+  await user.click(screen.getByRole('button', { name: '취소' }))
+  await user.click(screen.getAllByTitle('내용 이동')[0])
+  await act(async () => finishOld(occupiedSummary))
+  expect((screen.getByRole('button', { name: /Back.*확인 필요/ }) as HTMLButtonElement).disabled).toBe(true)
+  await act(async () => finishNew(occupiedSummary))
+  expect((screen.getByRole('button', { name: /Back.*기존 내용 있음/ }) as HTMLButtonElement).disabled).toBe(false)
 })
 
 describe('FieldsPage field editing', () => {

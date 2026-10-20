@@ -2,6 +2,25 @@ import type { NoteType, Workspace } from './api'
 
 export type EditorMode = 'front' | 'back' | 'css'
 
+export type MediaChangedDetail = Workspace | {
+  workspace: Workspace
+  rename?: { old: string; new: string }
+}
+
+export function renameDesignDraftMedia(drafts: Record<string, string>, oldName: string, newName: string) {
+  if (oldName === newName) return drafts
+  const escaped = oldName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const pattern = new RegExp(`(?<![\\w.-])${escaped}(?![\\w.-])`, 'g')
+  let changed = false
+  const next = Object.fromEntries(Object.entries(drafts).map(([key, value]) => {
+    // A replacement callback keeps "$&" and "$`" in real filenames literal.
+    const rewritten = value.replace(pattern, () => newName)
+    changed ||= rewritten !== value
+    return [key, rewritten]
+  }))
+  return changed ? next : drafts
+}
+
 export function parseDesignDraftKey(key: string): { noteTypeId: string; index: number; mode: EditorMode } | null {
   const modeSep = key.lastIndexOf(':')
   if (modeSep <= 0) return null

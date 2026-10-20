@@ -1,11 +1,12 @@
-import { useEffect, type ReactNode } from 'react'
+import { useId, type ReactNode } from 'react'
+import { Dialog } from './Dialog'
 import { AlertTriangle, ArrowUpRight, Check, Download, LogOut, Save, Sparkles, X } from 'lucide-react'
 
 export type AvailableUpdate = { version: string; url: string }
 
 export function ExitConfirmModal({ dirty, onCancel, onConfirm }: { dirty: boolean; onCancel: () => void; onConfirm: () => void }) {
-  return <div className="fixed inset-0 z-[200] grid place-items-center bg-slate-950/45 p-4 backdrop-blur-sm" onClick={onCancel}>
-    <div role="dialog" aria-modal="true" aria-labelledby="exit-title" aria-describedby="exit-description" className="w-full max-w-md rounded-[24px] border border-white/75 bg-white p-6 shadow-[0_28px_80px_rgba(15,23,42,.32)]" onClick={(event) => event.stopPropagation()}>
+  return <Dialog labelledBy="exit-title" describedBy="exit-description" onDismiss={onCancel} dismissOnBackdrop>
+    <div className="w-full max-w-md rounded-[24px] border border-white/75 bg-white p-6 shadow-[0_28px_80px_rgba(15,23,42,.32)]" onClick={(event) => event.stopPropagation()}>
       <div className="mb-4 grid h-11 w-11 place-items-center rounded-xl bg-[#151d31] text-white shadow-[0_10px_24px_rgba(15,23,42,.16)]"><LogOut size={20} /></div>
       <h3 id="exit-title" className="text-lg font-semibold tracking-[-.015em] text-slate-900">Anki Helper를 종료할까요?</h3>
       <p id="exit-description" className="mt-2 text-sm leading-6 text-slate-500">
@@ -23,23 +24,13 @@ export function ExitConfirmModal({ dirty, onCancel, onConfirm }: { dirty: boolea
         <button onClick={onConfirm} className={`rounded-xl px-4 py-2.5 text-sm font-semibold text-white transition ${dirty ? 'bg-slate-800 hover:bg-slate-900' : 'bg-[#151d31] hover:bg-[#202b45]'}`}>{dirty ? '저장하지 않고 종료' : '종료'}</button>
       </div>
     </div>
-  </div>
+  </Dialog>
 }
 
 export function UpdateAvailableModal({ update, onDismiss, onOpen }: { update: AvailableUpdate; onDismiss: () => void; onOpen: () => void | Promise<void> }) {
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        event.preventDefault()
-        onDismiss()
-      }
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [onDismiss])
 
-  return <div className="fixed inset-0 z-[160] grid place-items-center bg-slate-950/50 p-4 backdrop-blur-md" onClick={onDismiss}>
-    <section role="dialog" aria-modal="true" aria-labelledby="update-title" className="relative w-full max-w-[470px] overflow-hidden rounded-[28px] border border-white/15 bg-[#111a32] p-6 text-white shadow-[0_32px_90px_rgba(15,23,42,.55)] sm:p-8" onClick={(event) => event.stopPropagation()}>
+  return <Dialog labelledBy="update-title" onDismiss={onDismiss} dismissOnBackdrop className="fixed inset-0 grid place-items-center bg-slate-950/50 p-4 backdrop-blur-md">
+    <section className="relative w-full max-w-[470px] overflow-hidden rounded-[28px] border border-white/15 bg-[#111a32] p-6 text-white shadow-[0_32px_90px_rgba(15,23,42,.55)] sm:p-8" onClick={(event) => event.stopPropagation()}>
       <div className="pointer-events-none absolute -right-20 -top-24 h-56 w-56 rounded-full bg-indigo-500/35 blur-3xl" />
       <div className="pointer-events-none absolute -bottom-24 -left-16 h-52 w-52 rounded-full bg-cyan-400/20 blur-3xl" />
       <div className="relative">
@@ -59,31 +50,15 @@ export function UpdateAvailableModal({ update, onDismiss, onOpen }: { update: Av
         </div>
       </div>
     </section>
-  </div>
+  </Dialog>
 }
 
 export function UnsavedWorkModal({ onCancel, onSave, onDiscard }: { onCancel: () => void; onSave: () => void; onDiscard: () => void }) {
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') { event.preventDefault(); onCancel() }
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [onCancel])
-  return <div className="fixed inset-0 z-[210] grid place-items-center bg-slate-950/45 p-4 backdrop-blur-sm" onClick={onCancel}><div role="dialog" aria-modal="true" aria-label="새 작업 시작" className="w-full max-w-md rounded-[22px] border border-white/70 bg-white p-6 shadow-2xl" onClick={(event) => event.stopPropagation()}><div className="mb-4 grid h-11 w-11 place-items-center rounded-xl bg-amber-100 text-amber-700"><Save size={20} /></div><h3 className="text-lg font-semibold text-slate-900">저장하지 않은 변경이 있습니다</h3><p className="mt-2 text-sm leading-6 text-slate-500">현재 작업을 저장한 뒤 새 작업을 시작하거나, 저장하지 않고 계속할 수 있습니다.</p><div className="mt-6 flex flex-wrap justify-end gap-2"><button onClick={onCancel} className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-semibold text-slate-600">취소</button><button onClick={onDiscard} className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-semibold text-slate-700">저장하지 않고 계속</button><button onClick={onSave} className="rounded-xl bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white">저장 후 계속</button></div></div></div>
+  return <Dialog label="새 작업 시작" onDismiss={onCancel} dismissOnBackdrop><div className="w-full max-w-md rounded-[22px] border border-white/70 bg-white p-6 shadow-2xl" onClick={(event) => event.stopPropagation()}><div className="mb-4 grid h-11 w-11 place-items-center rounded-xl bg-amber-100 text-amber-700"><Save size={20} /></div><h3 className="text-lg font-semibold text-slate-900">저장하지 않은 변경이 있습니다</h3><p className="mt-2 text-sm leading-6 text-slate-500">현재 작업을 저장한 뒤 새 작업을 시작하거나, 저장하지 않고 계속할 수 있습니다.</p><div className="mt-6 flex flex-wrap justify-end gap-2"><button onClick={onCancel} className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-semibold text-slate-600">취소</button><button onClick={onDiscard} className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-semibold text-slate-700">저장하지 않고 계속</button><button onClick={onSave} className="rounded-xl bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white">저장 후 계속</button></div></div></Dialog>
 }
 
 export function Modal({ title, description, tone = 'normal', confirmLabel, onCancel, onConfirm }: { title: string; description: ReactNode; tone?: 'normal' | 'danger'; confirmLabel: string; onCancel?: () => void; onConfirm: () => void | Promise<void> }) {
-  useEffect(() => {
-    if (!onCancel) return
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        event.preventDefault()
-        onCancel()
-      }
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [onCancel])
-  return <div className="fixed inset-0 z-[80] grid place-items-center bg-slate-950/40 p-4 backdrop-blur-sm"><div className="w-full max-w-md rounded-[22px] border border-white/70 bg-white p-6 shadow-2xl"><div className={`mb-4 grid h-11 w-11 place-items-center rounded-xl ${tone === 'danger' ? 'bg-rose-100 text-rose-600' : 'bg-indigo-100 text-indigo-600'}`}>{tone === 'danger' ? <X size={20} /> : <Check size={20} />}</div><h3 className="text-lg font-semibold">{title}</h3><p className="mt-2 text-sm leading-6 text-slate-500">{description}</p><div className="mt-6 flex justify-end gap-2">{onCancel && <button onClick={onCancel} className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-semibold text-slate-600">취소</button>}<button onClick={onConfirm} className={`rounded-xl px-4 py-2.5 text-sm font-semibold text-white ${tone === 'danger' ? 'bg-rose-600' : 'bg-indigo-600'}`}>{confirmLabel}</button></div></div></div>
+  const titleId = useId()
+  const descriptionId = useId()
+  return <Dialog labelledBy={titleId} describedBy={descriptionId} onDismiss={onCancel}><div className="w-full max-w-md rounded-[22px] border border-white/70 bg-white p-6 shadow-2xl"><div className={`mb-4 grid h-11 w-11 place-items-center rounded-xl ${tone === 'danger' ? 'bg-rose-100 text-rose-600' : 'bg-indigo-100 text-indigo-600'}`}>{tone === 'danger' ? <X size={20} /> : <Check size={20} />}</div><h3 id={titleId} className="text-lg font-semibold">{title}</h3><div id={descriptionId} className="mt-2 text-sm leading-6 text-slate-500">{description}</div><div className="mt-6 flex justify-end gap-2">{onCancel && <button onClick={onCancel} className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-semibold text-slate-600">취소</button>}<button onClick={onConfirm} className={`rounded-xl px-4 py-2.5 text-sm font-semibold text-white ${tone === 'danger' ? 'bg-rose-600' : 'bg-indigo-600'}`}>{confirmLabel}</button></div></div></Dialog>
 }

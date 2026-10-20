@@ -41,6 +41,10 @@ from .anki_package import (
     Template,
     SCRIPT_CONTENT,
     SCRIPT_STRING,
+    ankidesign_media_conflicts,
+    apply_ankidesign,
+    design_media_lists,
+    export_ankidesign,
     export_design,
     export_media,
     export_project,
@@ -56,6 +60,7 @@ from .anki_package import (
     media_references_for,
     move_note_field_contents,
     move_notes_between_types,
+    read_ankidesign,
     read_apkg,
     remove_media,
     remove_media_files,
@@ -66,6 +71,7 @@ from .anki_package import (
     save_apkg,
     save_as_note_type,
     split_field_content,
+    template_field_names,
     create_package_from_table,
     decode_media_payload,
 )
@@ -369,6 +375,16 @@ class MediaDeleteRequest(BaseModel):
 
 class ImportProjectRequest(BaseModel):
     path: str
+
+
+class AnkiDesignInspectRequest(BaseModel):
+    path: str
+
+
+class AnkiDesignApplyRequest(BaseModel):
+    path: str
+    field_mapping: dict[str, str] = {}
+    overwrite_media: bool = False
 
 
 class TableInspectRequest(BaseModel):
@@ -687,7 +703,7 @@ try{{
 const rewriteElement=element=>{{
   if(!(element instanceof Element))return;
   for(const name of ["src","srcset","poster","href"]){{
-    if(element.hasAttribute(name)){{const current=element.getAttribute(name);const next=resolve(current);if(next!==current)element.setAttribute(name,next);}}
+    if(element.hasAttribute(name)){{const current=element.getAttribute(name);const next=name==="srcset"?resolveSrcset(current):resolve(current);if(next!==current)element.setAttribute(name,next);}}
   }}
   if(element.hasAttribute("style")){{const current=element.getAttribute("style");const next=resolveCss(current);if(next!==current)element.setAttribute("style",next);}}
   if(element instanceof HTMLStyleElement){{const next=resolveCss(element.textContent);if(next!==element.textContent)element.textContent=next;}}
@@ -1349,6 +1365,69 @@ _MEDIA_TYPE_LABELS = {
     "font": "폰트",
     "other": "기타",
 }
+
+
+@app.get("/api/note-types/{note_type_id}/ankidesign/preview")
+def preview_ankidesign(note_type_id: str) -> dict:
+    package = _backend_state().package
+    note_type = _get_note_type(note_type_id)
+    if package is None:
+        raise HTTPException(status_code=404, detail="패키지를 찾지 못했습니다.")
+    media, missing = design_media_lists(package, note_type)
+    return {"missing": missing, "media": media}
+
+
+@app.get("/api/note-types/{note_type_id}/ankidesign")
+def download_ankidesign(note_type_id: str) -> FileResponse:
+    package = _backend_state().package
+    note_type = _get_note_type(note_type_id)
+    if package is None:
+        raise HTTPException(status_code=404, detail="패키지를 찾지 못했습니다.")
+    temporary = tempfile.NamedTemporaryFile(prefix="anki-helper-", suffix=".ankidesign", delete=False)
+    temporary.close()
+    target = Path(temporary.name)
+    try:
+        export_ankidesign(package, note_type, target)
+    except ValueError as exc:
+        target.unlink(missing_ok=True)
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _temporary_file_response(target, filename=f"{note_type.name}.ankidesign", media_type="application/octet-stream")
+
+
+@app.post("/api/note-types/{note_type_id}/ankidesign/inspect")
+def inspect_ankidesign(note_type_id: str, payload: AnkiDesignInspectRequest) -> dict:
+    package = _backend_state().package
+    note_type = _get_note_type(note_type_id)
+    if package is None:
+        raise HTTPException(status_code=404, detail="패키지를 찾지 못했습니다.")
+    try:
+        design = read_ankidesign(payload.path)
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    markups = [design.css, *(side for template in design.templates for side in (template.front, template.back))]
+    return {
+        "templates": [{"name": template.name, "front": template.front, "back": template.back} for template in design.templates],
+        "css": design.css,
+        "fields": template_field_names(*markups),
+        "media": list(design.media),
+        "conflicts": ankidesign_media_conflicts(package, design),
+        "current_fields": [field.name for field in note_type.fields],
+    }
+
+
+@app.post("/api/note-types/{note_type_id}/ankidesign")
+def import_ankidesign(note_type_id: str, payload: AnkiDesignApplyRequest) -> dict:
+    state = _backend_state()
+    package = state.package
+    note_type = _get_note_type(note_type_id, state)
+    if package is None:
+        raise HTTPException(status_code=404, detail="패키지를 찾지 못했습니다.")
+    try:
+        design = read_ankidesign(payload.path)
+        apply_ankidesign(package, note_type, design, payload.field_mapping, overwrite_media=payload.overwrite_media)
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _workspace_data(state) or {}
 
 
 @app.get("/api/note-types/{note_type_id}/export/{kind}")

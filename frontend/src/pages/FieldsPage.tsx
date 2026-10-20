@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { ArrowRight, ArrowRightLeft, ChevronDown, ChevronUp, Music2, Plus, Trash2, Type } from 'lucide-react'
 import { api, type Field, type NoteType } from '../api'
 import { Card } from '../components/Card'
+import { Dialog } from '../components/Dialog'
 import { Modal } from '../components/Modal'
 
 export function FieldsPage({ noteType, onRename, onAdd, onDelete, onReorder, onMove, onClone }: {
@@ -22,36 +23,58 @@ export function FieldsPage({ noteType, onRename, onAdd, onDelete, onReorder, onM
   const [moveMode, setMoveMode] = useState<'text' | 'media' | 'all'>('all')
   const [summary, setSummary] = useState<{ filled: number; mixed: number; has_mixed: boolean; destination_filled: Record<string, number>; sample_text: string; sample_media: string } | null>(null)
   const [busyMove, setBusyMove] = useState(false)
+  const [loadingSummary, setLoadingSummary] = useState(false)
+  const [moveError, setMoveError] = useState('')
+  const summaryRequest = useRef(0)
 
   useEffect(() => {
-    if (!moving) return
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape') return
-      event.preventDefault()
-      setMoving(null); setDestination(null); setSummary(null)
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [moving])
+    summaryRequest.current += 1
+    setMoving(null)
+    setDestination(null)
+    setSummary(null)
+    setMoveError('')
+    setLoadingSummary(false)
+    return () => { summaryRequest.current += 1 }
+  }, [noteType?.id])
 
   if (!noteType) return null
   const filled = deleting ? noteType.notes.filter((row) => Boolean(row[deleting.order]?.trim())).length : 0
 
-  const openMove = async (field: Field) => {
+  const loadSummary = async (field: Field) => {
+    const request = ++summaryRequest.current
+    setSummary(null)
+    setMoveError('')
+    setLoadingSummary(true)
+    try {
+      const next = await api.fieldContentSummary(noteType.id, field.order)
+      if (request === summaryRequest.current) setSummary(next)
+    } catch {
+      if (request === summaryRequest.current) setMoveError('이동할 내용과 도착 필드를 확인하지 못했습니다. 다시 시도해 주세요.')
+    } finally {
+      if (request === summaryRequest.current) setLoadingSummary(false)
+    }
+  }
+
+  const closeMove = () => {
+    if (busyMove) return
+    summaryRequest.current += 1
+    setMoving(null)
+    setDestination(null)
+    setSummary(null)
+    setMoveError('')
+    setLoadingSummary(false)
+  }
+
+  const openMove = (field: Field) => {
     setMoving(field)
     setMoveStep('destination')
     setDestination(null)
     setMoveMode('all')
-    setSummary(null)
-    try {
-      const next = await api.fieldContentSummary(noteType.id, field.order)
-      setSummary(next)
-    } catch {
-      setSummary({ filled: 0, mixed: 0, has_mixed: false, destination_filled: {}, sample_text: '', sample_media: '' })
-    }
+    void loadSummary(field)
   }
 
   const chooseDestination = (field: Field) => {
+    if (!summary || loadingSummary || busyMove) return
     setDestination(field)
     if (summary?.has_mixed) {
       setMoveStep('payload')
@@ -67,7 +90,7 @@ export function FieldsPage({ noteType, onRename, onAdd, onDelete, onReorder, onM
   }
 
   const choosePayload = (mode: 'text' | 'media' | 'all') => {
-    if (!destination) return
+    if (!destination || !summary || loadingSummary || busyMove) return
     setMoveMode(mode)
     const destFilled = summary?.destination_filled?.[String(destination.order)] ?? 0
     if (destFilled > 0) {
@@ -78,13 +101,16 @@ export function FieldsPage({ noteType, onRename, onAdd, onDelete, onReorder, onM
   }
 
   const runMove = async (target: Field, mode: 'text' | 'media' | 'all') => {
-    if (!moving) return
+    if (!moving || !summary || loadingSummary || busyMove) return
     setBusyMove(true)
+    setMoveError('')
     try {
       await onMove(moving.order, target.order, mode)
       setMoving(null)
       setDestination(null)
       setSummary(null)
+    } catch (caught) {
+      setMoveError(caught instanceof Error ? caught.message : '내용을 이동하지 못했습니다. 다시 시도해 주세요.')
     } finally {
       setBusyMove(false)
     }
@@ -134,9 +160,11 @@ export function FieldsPage({ noteType, onRename, onAdd, onDelete, onReorder, onM
     {deleting && <Modal title={`‘${deleting.name}’ 필드를 삭제할까요?`} description={filled ? `${filled.toLocaleString()}개 노트에 내용이 있습니다. 필드 값과 템플릿 참조가 함께 삭제되며 저장 후에는 백업으로만 복구할 수 있습니다.` : '비어 있는 필드입니다. 템플릿의 필드 참조도 함께 삭제됩니다.'} tone="danger" confirmLabel="필드 삭제" onCancel={() => setDeleting(null)} onConfirm={async () => { await onDelete(deleting.order); setDeleting(null) }} />}
 
     {moving && (
-      <div className="fixed inset-0 z-[80] grid place-items-center bg-slate-950/40 p-4 backdrop-blur-sm">
+      <Dialog label="필드 내용 이동" onDismiss={busyMove ? undefined : closeMove}>
         <div className="w-full max-w-lg rounded-[22px] border border-white/70 bg-white p-6 shadow-2xl">
           <div className="mb-4 grid h-11 w-11 place-items-center rounded-xl bg-indigo-100 text-indigo-600"><ArrowRightLeft size={20} /></div>
+          {loadingSummary && <p role="status" className="mb-3 text-sm text-slate-500">이동할 내용과 도착 필드를 확인하는 중…</p>}
+          {moveError && <div role="alert" className="mb-3 rounded-xl bg-rose-50 p-3 text-sm text-rose-700">{moveError}{!summary && <button onClick={() => void loadSummary(moving)} className="ml-2 font-semibold underline">다시 시도</button>}</div>}
           {moveStep === 'destination' && (
             <>
               <h3 className="text-lg font-semibold">‘{moving.name}’ 내용을 어디로 옮길까요?</h3>
@@ -144,8 +172,8 @@ export function FieldsPage({ noteType, onRename, onAdd, onDelete, onReorder, onM
               <div className="mt-5 max-h-72 space-y-2 overflow-y-auto">
                 {noteType.fields.filter((field) => field.order !== moving.order).map((field) => {
                   const occupied = summary?.destination_filled?.[String(field.order)] ?? 0
-                  return <button key={field.order} disabled={busyMove} onClick={() => chooseDestination(field)} className="flex w-full items-center justify-between rounded-xl border border-slate-200 px-4 py-3 text-left hover:border-indigo-300 hover:bg-indigo-50 disabled:opacity-50">
-                    <span><b className="block text-sm text-slate-700">{field.name}</b><small className="text-xs text-slate-400">{occupied > 0 ? `${occupied.toLocaleString()}개 노트에 기존 내용 있음` : '비어 있는 필드'}</small></span>
+                  return <button key={field.order} disabled={busyMove || loadingSummary || !summary} onClick={() => chooseDestination(field)} className="flex w-full items-center justify-between rounded-xl border border-slate-200 px-4 py-3 text-left hover:border-indigo-300 hover:bg-indigo-50 disabled:opacity-50">
+                    <span><b className="block text-sm text-slate-700">{field.name}</b><small className="text-xs text-slate-400">{!summary ? '확인 필요' : occupied > 0 ? `${occupied.toLocaleString()}개 노트에 기존 내용 있음` : '비어 있는 필드'}</small></span>
                     <ArrowRight className="text-slate-300" size={16} />
                   </button>
                 })}
@@ -182,9 +210,9 @@ export function FieldsPage({ noteType, onRename, onAdd, onDelete, onReorder, onM
               </div>
             </>
           )}
-          {moveStep !== 'confirm' && <div className="mt-6 flex justify-end"><button onClick={() => { setMoving(null); setDestination(null) }} className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-semibold text-slate-600">취소</button></div>}
+          {moveStep !== 'confirm' && <div className="mt-6 flex justify-end"><button disabled={busyMove} onClick={closeMove} className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-semibold text-slate-600">취소</button></div>}
         </div>
-      </div>
+      </Dialog>
     )}
   </div>
 }

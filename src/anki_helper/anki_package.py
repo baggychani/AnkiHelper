@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import csv
-import glob
 import hashlib
 import html
 import io
@@ -200,25 +199,38 @@ def decode_media_payload(data: bytes) -> bytes:
 
 def _read_media_map(archive: zipfile.ZipFile, entries: set[str]) -> dict[str, str]:
     if "media" not in entries:
+        if any(name.isdigit() for name in entries):
+            raise ApkgReadError("미디어 파일은 있지만 미디어 인덱스가 없습니다.")
         return {}
     try:
         content = archive.read("media")
-        if content.startswith(b"\x28\xb5\x2f\xfd"):
+        compressed = content.startswith(b"\x28\xb5\x2f\xfd")
+        if compressed:
             content = _decompress_anki21b(content)
         try:
             raw = json.loads(content.decode("utf-8"))
             if not isinstance(raw, dict):
                 raise ValueError("미디어 인덱스가 예상한 형식이 아닙니다.")
-            return {str(stored): str(original) for stored, original in raw.items()}
+            if any(not isinstance(name, str) or not name for name in raw.values()):
+                raise ValueError("미디어 파일 이름이 올바르지 않습니다.")
+            output = raw
         except (UnicodeDecodeError, json.JSONDecodeError):
+            if not compressed or "collection.anki21b" not in entries:
+                raise ValueError("기존 APKG의 미디어 인덱스는 JSON 객체여야 합니다.")
             # collection.anki21b stores media metadata as protobuf. APKG media
             # payload entries retain the metadata message's zero-based order.
-            output: dict[str, str] = {}
-            for index, entry in enumerate(_protobuf_parts(content).get(1, [])):
-                name = _decode_protobuf_text(_protobuf_parts(entry), 1)
-                if name:
-                    output[str(index)] = name
-            return output
+            output = {}
+            parts = _protobuf_parts(content)
+            if content and not parts.get(1):
+                raise ValueError("미디어 항목을 찾지 못했습니다.")
+            for index, entry in enumerate(parts.get(1, [])):
+                names = _protobuf_parts(entry).get(1, [])
+                if len(names) != 1 or not names[0]:
+                    raise ValueError("미디어 파일 이름이 없습니다.")
+                output[str(index)] = names[0].decode("utf-8")
+        if not output and any(name.isdigit() for name in entries):
+            raise ValueError("미디어 파일은 있지만 미디어 인덱스가 비어 있습니다.")
+        return output
     except (OSError, AttributeError, ValueError) as exc:
         # A silently empty media map used to look identical to "no media in
         # this deck": every media feature (list/health/preview) would just
@@ -373,6 +385,8 @@ def _protobuf_parts(blob: bytes) -> dict[int, list[bytes]]:
     while index < len(blob):
         key, index = _read_varint(blob, index)
         field, wire_type = key >> 3, key & 7
+        if not 1 <= field < 2**29:
+            raise ValueError("Invalid protobuf field number")
         if wire_type == 0:
             _, index = _read_varint(blob, index)
         elif wire_type == 1:
@@ -384,7 +398,9 @@ def _protobuf_parts(blob: bytes) -> dict[int, list[bytes]]:
         elif wire_type == 5:
             index += 4
         else:
-            break
+            raise ValueError("Unsupported protobuf wire type")
+        if index > len(blob):
+            raise ValueError("Truncated protobuf field")
     return values
 
 
@@ -394,6 +410,8 @@ def _read_varint(data: bytes, index: int) -> tuple[int, int]:
     while index < len(data):
         byte = data[index]
         index += 1
+        if shift == 63 and byte > 1:
+            raise ValueError("Protobuf varint exceeds 64 bits")
         value |= (byte & 0x7F) << shift
         if not byte & 0x80:
             return value, index
@@ -435,6 +453,7 @@ def _encode_modern_media_index(entries: list[tuple[str, bytes]]) -> bytes:
 
 def _replace_protobuf_text(blob: bytes, field_number: int, text: str) -> bytes:
     """Replace one length-delimited protobuf field while preserving unknown data."""
+    _protobuf_parts(blob)  # Never write a partially decoded, malformed message.
     replacement = text.encode("utf-8")
     output = bytearray()
     index = 0
@@ -487,10 +506,11 @@ def _backup_dir() -> Path:
 def _backup_source(source: Path) -> Path:
     backup_dir = _backup_dir()
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    backup = backup_dir / f"{source.stem}_{stamp}{source.suffix}"
+    prefix = _backup_prefix(source)
+    backup = backup_dir / f"{prefix}{stamp}{source.suffix}"
     counter = 1
     while backup.exists():
-        backup = backup_dir / f"{source.stem}_{stamp}-{counter}{source.suffix}"
+        backup = backup_dir / f"{prefix}{stamp}-{counter}{source.suffix}"
         counter += 1
     shutil.copy2(source, backup)
     _prune_old_backups(backup_dir, source)
@@ -498,7 +518,11 @@ def _backup_source(source: Path) -> Path:
 
 
 MAX_BACKUPS_PER_SOURCE = 20
-_BACKUP_STAMP = re.compile(r"_(?P<stamp>\d{8}-\d{6})(?:-(?P<counter>\d+))?$")
+
+
+def _backup_prefix(source: Path) -> str:
+    identity = os.path.normcase(str(source.resolve())).encode("utf-8")
+    return f"{source.stem}_{hashlib.sha256(identity).hexdigest()[:24]}_"
 
 
 def _prune_old_backups(backup_dir: Path, source: Path, *, keep: int = MAX_BACKUPS_PER_SOURCE) -> None:
@@ -510,18 +534,21 @@ def _prune_old_backups(backup_dir: Path, source: Path, *, keep: int = MAX_BACKUP
     backup, so mtime can't tell them apart -- only the timestamp encoded in
     each backup's own filename can, hence the bespoke sort key below.
     """
-    prefix, suffix = f"{source.stem}_", source.suffix
+    # Old backups have no source identity. Preserve them because assigning
+    # them to a path from the basename alone could delete another deck's data.
+    pattern = re.compile(
+        re.escape(_backup_prefix(source))
+        + r"(?P<stamp>\d{8}-\d{6})(?:-(?P<counter>\d+))?"
+        + re.escape(source.suffix)
+    )
 
     def backup_key(item: Path) -> tuple[str, int] | None:
-        if not (item.name.startswith(prefix) and item.name.endswith(suffix)):
-            return None
-        stem = item.name[: len(item.name) - len(suffix)] if suffix else item.name
-        match = _BACKUP_STAMP.search(stem)
+        match = pattern.fullmatch(item.name)
         return (match.group("stamp"), int(match.group("counter") or 0)) if match else None
 
     dated = [
         (key, item)
-        for item in backup_dir.glob(f"{glob.escape(prefix)}*{glob.escape(suffix)}")
+        for item in backup_dir.iterdir()
         if item.is_file() and (key := backup_key(item)) is not None
     ]
     dated.sort(key=lambda pair: pair[0], reverse=True)
@@ -793,6 +820,50 @@ def _card_defaults(connection: sqlite3.Connection, source_mid: str | None, ord_i
     return (0, 0, 0, 2500, 0, 0, 0, 0, "")
 
 
+def _legacy_template_record(template: Template, index: int, base: dict[str, Any] | None) -> dict[str, Any]:
+    record = dict(base or {"bqfmt": "", "bafmt": "", "did": None, "bfont": "", "bsize": 0})
+    record["name"] = template.name
+    record["ord"] = index
+    record["qfmt"] = template.front
+    record["afmt"] = template.back
+    return record
+
+
+def _template_requirements(note_type: NoteType) -> list[list[Any]]:
+    names = [field.name for field in note_type.fields]
+    requirements: list[list[Any]] = []
+    for index, template in enumerate(note_type.templates):
+        tokens = [match.rsplit(":", 1)[-1].strip() for match in FIELD_TOKEN.findall(template.front)]
+        order = next((field_index for field_index, name in enumerate(names) if name in tokens), 0)
+        requirements.append([index, "any", [order]])
+    return requirements
+
+
+def _sync_template_cards(connection: sqlite3.Connection, note_ids: list[int], template_count: int, source_mid: str | None) -> None:
+    """Give every existing note one card per template, and drop cards for removed templates."""
+    deck_id = _default_deck_id(connection)
+    mod = int(datetime.now().timestamp())
+    for note_id in note_ids:
+        rows = connection.execute("SELECT id, ord FROM cards WHERE nid=?", (note_id,)).fetchall()
+        for card_id, ord_idx in rows:
+            if int(ord_idx) >= template_count:
+                connection.execute("DELETE FROM cards WHERE id=?", (card_id,))
+        existing = {int(ord_idx) for _card_id, ord_idx in rows if int(ord_idx) < template_count}
+        for ord_idx in range(template_count):
+            if ord_idx in existing:
+                continue
+            card_id = _alloc_card_id(connection)
+            card_type, queue, ivl, factor, reps, lapses, left, flags, data = _card_defaults(connection, source_mid, ord_idx)
+            due = int(connection.execute("SELECT COALESCE(MAX(due), 0) + 1 FROM cards WHERE did=?", (deck_id,)).fetchone()[0])
+            connection.execute(
+                """
+                INSERT INTO cards (id, nid, did, ord, mod, usn, type, queue, due, ivl, factor, reps, lapses, left, odue, odid, flags, data)
+                VALUES (?, ?, ?, ?, ?, -1, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)
+                """,
+                (card_id, note_id, deck_id, ord_idx, mod, card_type, queue, due, ivl, factor, reps, lapses, left, flags, data),
+            )
+
+
 def _sync_note_rows_legacy(connection: sqlite3.Connection, package: DeckPackage, note_type: NoteType, model_id: int) -> None:
     key = str(model_id)
     note_ids = list(package.note_ids.get(key, []))
@@ -909,13 +980,27 @@ def _write_legacy_changes(connection: sqlite3.Connection, package: DeckPackage) 
                 base = {"font": "Arial", "size": 20, "rtl": False, "sticky": False}
             model["flds"].append({**base, "name": field.name, "ord": index})
         original_templates = model.get("tmpls", [])
-        for index, template in enumerate(note_type.templates):
-            if index < len(original_templates):
-                original_templates[index]["name"] = template.name
-                original_templates[index]["qfmt"] = template.front
-                original_templates[index]["afmt"] = template.back
+        stored_template_count = len(original_templates) if isinstance(original_templates, list) else 0
+        if stored_template_count == len(note_type.templates):
+            for index, template in enumerate(note_type.templates):
+                if index < len(original_templates):
+                    original_templates[index]["name"] = template.name
+                    original_templates[index]["qfmt"] = template.front
+                    original_templates[index]["afmt"] = template.back
+        else:
+            model["tmpls"] = [
+                _legacy_template_record(
+                    template,
+                    index,
+                    original_templates[index] if index < stored_template_count and isinstance(original_templates[index], dict) else None,
+                )
+                for index, template in enumerate(note_type.templates)
+            ]
+            model["req"] = _template_requirements(note_type)
         model["css"] = note_type.css
         _sync_note_rows_legacy(connection, package, note_type, int(note_type.id))
+        if stored_template_count != len(note_type.templates):
+            _sync_template_cards(connection, package.note_ids.get(note_type.id, []), len(note_type.templates), note_type.source_id)
     _purge_removed_note_types_legacy(connection, package, models)
     connection.execute("UPDATE col SET models=?, mod=strftime('%s','now'), usn=-1", (json.dumps(models, ensure_ascii=False),))
 
@@ -953,15 +1038,25 @@ def _write_normalized_changes(connection: sqlite3.Connection, package: DeckPacka
         for index, field in enumerate(note_type.fields):
             config = existing_by_name.get(field.name, b"")
             connection.execute("INSERT INTO fields (ntid, ord, name, config) VALUES (?, ?, ?, ?)", (type_id, index, field.name, config))
+        stored_template_count = connection.execute("SELECT COUNT(*) FROM templates WHERE ntid=?", (type_id,)).fetchone()[0]
         for index, template in enumerate(note_type.templates):
             row = connection.execute("SELECT config FROM templates WHERE ntid=? AND ord=?", (type_id, index)).fetchone()
+            config = _replace_protobuf_text(_replace_protobuf_text(row[0] if row else b"", 1, template.front), 2, template.back)
             if row:
-                config = _replace_protobuf_text(_replace_protobuf_text(row[0], 1, template.front), 2, template.back)
                 connection.execute("UPDATE templates SET name=?, config=? WHERE ntid=? AND ord=?", (template.name, config, type_id, index))
+            else:
+                connection.execute(
+                    "INSERT INTO templates (ntid, ord, name, mtime_secs, usn, config) VALUES (?, ?, ?, strftime('%s','now'), -1, ?)",
+                    (type_id, index, template.name, config),
+                )
+        if stored_template_count > len(note_type.templates):
+            connection.execute("DELETE FROM templates WHERE ntid=? AND ord>=?", (type_id, len(note_type.templates)))
         row = connection.execute("SELECT config FROM notetypes WHERE id=?", (type_id,)).fetchone()
         if row:
             connection.execute("UPDATE notetypes SET name=?, config=?, mtime_secs=strftime('%s','now'), usn=-1 WHERE id=?", (note_type.name, _replace_protobuf_text(row[0], 3, note_type.css), type_id))
         _sync_note_rows_normalized(connection, package, note_type, type_id)
+        if stored_template_count != len(note_type.templates):
+            _sync_template_cards(connection, package.note_ids.get(note_type.id, []), len(note_type.templates), note_type.source_id)
     _purge_removed_note_types_normalized(connection, package)
 
 
@@ -994,7 +1089,9 @@ def save_apkg(package: DeckPackage, destination: str | Path | None = None, *, ba
                 temp_output = target.with_suffix(target.suffix + ".tmp")
                 original_media_index = source_archive.read("media") if "media" in package.archive_entries else b""
                 modern_media = package.database_name.endswith(".anki21b")
-                media_changed = bool(package.pending_media or package.removed_media)
+                media_changed = bool(package.pending_media or package.removed_media) or (
+                    modern_media and package.media != _read_media_map(source_archive, package.archive_entries)
+                )
                 modern_index_is_protobuf = False
                 if modern_media and original_media_index.startswith(b"\x28\xb5\x2f\xfd"):
                     try:
@@ -1439,6 +1536,228 @@ def export_design(note_type: NoteType, destination: str | Path) -> Path:
     target = Path(destination)
     target.write_text(json.dumps(design_document(note_type), ensure_ascii=False, indent=2), encoding="utf-8")
     return target
+
+
+ANKIDESIGN_FORMAT = "anki-helper/ankidesign-v1"
+_SPECIAL_TEMPLATE_FIELDS = frozenset({"FrontSide", "Tags", "Type", "Deck", "Subdeck", "Card", "CardFlag"})
+_TEMPLATE_FIELD = re.compile(r"\{\{\s*([#^/])?\s*([^{}]+?)\s*\}\}")
+
+
+@dataclass(slots=True)
+class AnkiDesign:
+    templates: list[Template]
+    css: str
+    media: dict[str, bytes]
+
+
+def template_field_names(*markups: str) -> list[str]:
+    """Field names written in card templates, ignoring Anki's built-in fields."""
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for markup in markups:
+        for match in _TEMPLATE_FIELD.finditer(markup):
+            name = match.group(2).split("::", 1)[0].rsplit(":", 1)[-1].strip()
+            if not name or name in _SPECIAL_TEMPLATE_FIELDS or name in seen:
+                continue
+            seen.add(name)
+            ordered.append(name)
+    return ordered
+
+
+def rewrite_template_fields(markup: str, mapping: dict[str, str]) -> str:
+    """Rename {{field}} tokens. Names absent from mapping stay as written."""
+
+    def replace(match: re.Match[str]) -> str:
+        marker = match.group(1) or ""
+        body, separator, extra = match.group(2).partition("::")
+        pieces = body.split(":")
+        field = pieces[-1].strip()
+        renamed = mapping.get(field)
+        if not renamed or renamed == field:
+            return match.group(0)
+        pieces[-1] = renamed
+        rewritten = ":".join(pieces)
+        if separator:
+            rewritten += separator + extra
+        return "{{" + marker + rewritten + "}}"
+
+    return _TEMPLATE_FIELD.sub(replace, markup)
+
+
+def note_type_design_media(note_type: NoteType) -> list[str]:
+    """Filenames written in this note type's card code, in first-seen order."""
+    ordered: list[str] = []
+    seen: set[str] = set()
+    markups = [note_type.css, *(side for template in note_type.templates for side in (template.front, template.back))]
+    for markup in markups:
+        for raw, dynamic in _markup_media_values(markup):
+            filename = media_reference_filename(raw)
+            if not filename or filename in seen:
+                continue
+            if dynamic and Path(filename).suffix.casefold() not in MEDIA_FILE_EXTENSIONS:
+                continue
+            seen.add(filename)
+            ordered.append(filename)
+    return ordered
+
+
+def _available_stored_media(package: DeckPackage, filename: str) -> str | None:
+    for stored_name, name in package.media.items():
+        if name == filename and _media_is_available(package, stored_name):
+            return stored_name
+    return None
+
+
+def _read_media_bytes(package: DeckPackage, stored_name: str) -> bytes:
+    staged_path = package.pending_media.get(stored_name)
+    if staged_path and staged_path.is_file():
+        return staged_path.read_bytes()
+    with zipfile.ZipFile(package.source) as archive:
+        return decode_media_payload(archive.read(stored_name))
+
+
+def design_media_lists(package: DeckPackage, note_type: NoteType) -> tuple[list[str], list[str]]:
+    """Split code-referenced filenames into those present in the package and those missing."""
+    included: list[str] = []
+    missing: list[str] = []
+    for filename in note_type_design_media(note_type):
+        if filename != Path(filename).name or filename in {".", ".."} or _available_stored_media(package, filename) is None:
+            missing.append(filename)
+        else:
+            included.append(filename)
+    return included, missing
+
+
+def export_ankidesign(package: DeckPackage, note_type: NoteType, destination: str | Path) -> tuple[Path, list[str]]:
+    """Write card code plus the media files that code names.
+
+    Returns the written path and filenames the code names that are not in the package.
+    """
+    included_names, missing = design_media_lists(package, note_type)
+    included: list[tuple[str, bytes]] = []
+    for filename in included_names:
+        stored_name = _available_stored_media(package, filename)
+        if stored_name is None:
+            continue
+        included.append((filename, _read_media_bytes(package, stored_name)))
+    manifest = {
+        "format": ANKIDESIGN_FORMAT,
+        "templates": [{"name": template.name, "front": template.front, "back": template.back} for template in note_type.templates],
+        "css": note_type.css,
+        "media": [name for name, _data in included],
+    }
+    target = Path(destination)
+    with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as output:
+        output.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
+        for name, data in included:
+            output.writestr(f"media/{name}", data)
+    return target, missing
+
+
+def read_ankidesign(path: str | Path) -> AnkiDesign:
+    source = Path(path)
+    if source.suffix.casefold() != ".ankidesign":
+        raise ValueError("Anki Helper 디자인 파일(.ankidesign)만 가져올 수 있습니다.")
+    if not source.is_file():
+        raise ValueError("디자인 파일을 찾을 수 없습니다.")
+    try:
+        archive = zipfile.ZipFile(source)
+    except zipfile.BadZipFile as exc:
+        raise ValueError("디자인 파일을 읽을 수 없습니다.") from exc
+    with archive:
+        names = set(archive.namelist())
+        if "manifest.json" not in names:
+            raise ValueError("디자인 파일 형식이 아닙니다.")
+        try:
+            manifest = json.loads(archive.read("manifest.json").decode("utf-8-sig"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError("디자인 파일 형식이 아닙니다.") from exc
+        if not isinstance(manifest, dict) or manifest.get("format") != ANKIDESIGN_FORMAT:
+            raise ValueError("이 버전의 Anki Helper에서 읽을 수 없는 디자인 파일입니다.")
+        raw_templates = manifest.get("templates")
+        if not isinstance(raw_templates, list) or not raw_templates:
+            raise ValueError("디자인에 카드가 없습니다.")
+        templates: list[Template] = []
+        for item in raw_templates:
+            if not isinstance(item, dict) or not isinstance(item.get("front"), str) or not isinstance(item.get("back"), str):
+                raise ValueError("디자인 카드 코드가 올바르지 않습니다.")
+            raw_name = item.get("name")
+            name = raw_name.strip() if isinstance(raw_name, str) and raw_name.strip() else f"Card {len(templates) + 1}"
+            templates.append(Template(name=name, front=item["front"], back=item["back"]))
+        css = manifest.get("css")
+        if not isinstance(css, str):
+            raise ValueError("디자인 CSS가 올바르지 않습니다.")
+        media_names = manifest.get("media", [])
+        if not isinstance(media_names, list) or any(not isinstance(name, str) for name in media_names):
+            raise ValueError("디자인 미디어 목록이 올바르지 않습니다.")
+        media: dict[str, bytes] = {}
+        for name in media_names:
+            if name != Path(name).name or name in {".", ".."}:
+                raise ValueError(f"디자인 미디어 이름이 올바르지 않습니다: {name}")
+            member = f"media/{name}"
+            if member not in names:
+                raise ValueError(f"디자인 파일에 미디어가 없습니다: {name}")
+            media[name] = archive.read(member)
+    return AnkiDesign(templates=templates, css=css, media=media)
+
+
+def ankidesign_media_conflicts(package: DeckPackage, design: AnkiDesign) -> list[str]:
+    """Media names that already exist in the deck with different bytes."""
+    conflicts: list[str] = []
+    for name, data in design.media.items():
+        stored_name = _available_stored_media(package, name)
+        if stored_name is not None and _read_media_bytes(package, stored_name) != data:
+            conflicts.append(name)
+    return conflicts
+
+
+def _stage_design_media(package: DeckPackage, name: str, data: bytes, *, overwrite: bool) -> None:
+    if name != Path(name).name or name in {".", ".."}:
+        raise ValueError(f"디자인 미디어 이름이 올바르지 않습니다: {name}")
+    stored_name = _available_stored_media(package, name)
+    if stored_name is not None and _read_media_bytes(package, stored_name) == data:
+        return
+    if stored_name is not None and not overwrite:
+        return
+    temporary = tempfile.NamedTemporaryFile(prefix="anki-helper-design-media-", suffix=Path(name).suffix, delete=False)
+    temporary.write(data)
+    temporary.close()
+    staged_path = Path(temporary.name)
+    try:
+        if stored_name is not None:
+            remove_media(package, stored_name)
+        new_stored_name = _next_media_stored_name(package)
+        package.media[new_stored_name] = name
+        package.pending_media[new_stored_name] = staged_path
+    except Exception:
+        staged_path.unlink(missing_ok=True)
+        raise
+
+
+def apply_ankidesign(package: DeckPackage, note_type: NoteType, design: AnkiDesign, mapping: dict[str, str], *, overwrite_media: bool) -> None:
+    """Replace card code and add its media. Fields and note rows stay as they are."""
+    if not design.templates:
+        raise ValueError("디자인에 카드가 없습니다.")
+    current_fields = {field.name for field in note_type.fields}
+    clean_mapping: dict[str, str] = {}
+    for source_name, target_name in mapping.items():
+        if not isinstance(source_name, str) or not isinstance(target_name, str):
+            raise ValueError("필드 연결 정보가 올바르지 않습니다.")
+        target = target_name.strip()
+        if target not in current_fields:
+            raise ValueError(f"연결한 필드가 현재 노트 유형에 없습니다: {target}")
+        clean_mapping[source_name] = target
+    note_type.css = rewrite_template_fields(design.css, clean_mapping)
+    note_type.templates = [
+        Template(
+            name=item.name,
+            front=rewrite_template_fields(item.front, clean_mapping),
+            back=rewrite_template_fields(item.back, clean_mapping),
+        )
+        for item in design.templates
+    ]
+    for name, data in design.media.items():
+        _stage_design_media(package, name, data, overwrite=overwrite_media)
 
 
 def _media_type(name: str) -> Literal["audio", "image", "video", "font", "other"]:

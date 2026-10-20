@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { ArrowRight, ArrowRightLeft, BookOpen, Braces, ListChecks, Music2, Table2, Trash2 } from 'lucide-react'
 import type { Field, NoteType, Workspace } from '../api'
 import { Card } from '../components/Card'
+import { Dialog } from '../components/Dialog'
 import { Modal } from '../components/Modal'
 
 type Page = 'overview' | 'data' | 'fields' | 'media' | 'design' | 'preview'
@@ -55,17 +56,6 @@ export function OverviewPage({ workspace, selected, onPage, onSelect, onDeleteNo
     setActiveSource(null)
   }
 
-  useEffect(() => {
-    if (!movingFrom) return
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape') return
-      event.preventDefault()
-      if (movingTo) { setMovingTo(null); setMapping({}); setActiveSource(null) }
-      else closeMove()
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [movingFrom, movingTo])
 
   const chooseDestination = (item: NoteType) => {
     if (!movingFrom) return
@@ -119,7 +109,7 @@ export function OverviewPage({ workspace, selected, onPage, onSelect, onDeleteNo
     </section>
 
     {movingFrom && !movingTo && (
-      <div className="fixed inset-0 z-[80] grid place-items-center bg-slate-950/40 p-4 backdrop-blur-sm">
+      <Dialog label="카드 이동" onDismiss={closeMove}>
         <div className="w-full max-w-md rounded-[22px] border border-white/70 bg-white p-6 shadow-2xl">
           <div className="mb-4 grid h-11 w-11 place-items-center rounded-xl bg-indigo-100 text-indigo-600"><ArrowRightLeft size={20} /></div>
           <h3 className="text-lg font-semibold">‘{movingFrom.name}’ 카드를 어디로 옮길까요?</h3>
@@ -134,11 +124,11 @@ export function OverviewPage({ workspace, selected, onPage, onSelect, onDeleteNo
           </div>
           <div className="mt-6 flex justify-end"><button onClick={closeMove} className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-semibold text-slate-600">취소</button></div>
         </div>
-      </div>
+      </Dialog>
     )}
 
     {movingFrom && movingTo && (
-      <div className="fixed inset-0 z-[80] grid place-items-center bg-slate-950/40 p-4 backdrop-blur-sm">
+      <Dialog label="필드 연결" onDismiss={busyMove ? undefined : () => { setMovingTo(null); setMapping({}); setActiveSource(null) }}>
         <div className="w-full max-w-3xl rounded-[22px] border border-white/70 bg-white p-6 shadow-2xl">
           <div className="mb-4 grid h-11 w-11 place-items-center rounded-xl bg-indigo-100 text-indigo-600"><ArrowRightLeft size={20} /></div>
           <h3 className="text-lg font-semibold">필드를 선으로 이으세요</h3>
@@ -193,7 +183,7 @@ export function OverviewPage({ workspace, selected, onPage, onSelect, onDeleteNo
             </button>
           </div>
         </div>
-      </div>
+      </Dialog>
     )}
 
     {deletingType && (

@@ -33,6 +33,14 @@ export type TablePreview = {
   sample_rows: string[][]
 }
 
+export type AnkiDesignInspection = {
+  templates: Template[]
+  css: string
+  fields: string[]
+  media: string[]
+  conflicts: string[]
+  current_fields: string[]
+}
 export type SourceNoteType = { id: string; name: string; fields: Field[]; template_count: number }
 export type NoteTypeSource = { source_name: string; note_types: SourceNoteType[] }
 
@@ -192,6 +200,14 @@ export const api = {
   importProject: (path: string) => request<{ workspace: Workspace; note_type_id: string }>('/api/projects/import', { method: 'POST', body: JSON.stringify({ path }) }),
   preview: (noteTypeId: string, templateIndex: number, side: 'front' | 'back', noteIndex: number, clozeOrdinal = 0, signal?: AbortSignal) =>
     request<{ html: string; cloze_ordinals: number[]; cloze_ordinal: number }>(`/api/note-types/${noteTypeId}/preview?template_index=${templateIndex}&side=${side}&note_index=${noteIndex}&cloze_ordinal=${clozeOrdinal}`, { signal }),
+  ankidesignPreview: (noteTypeId: string) => request<{ missing: string[]; media: string[] }>(`/api/note-types/${noteTypeId}/ankidesign/preview`),
+  ankidesignExportUrl: (noteTypeId: string) => withAccessToken(`${base}/api/note-types/${noteTypeId}/ankidesign`),
+  inspectAnkiDesign: (noteTypeId: string, path: string) => request<AnkiDesignInspection>(`/api/note-types/${noteTypeId}/ankidesign/inspect`, { method: 'POST', body: JSON.stringify({ path }) }),
+  applyAnkiDesign: (noteTypeId: string, path: string, fieldMapping: Record<string, string>, overwriteMedia: boolean) =>
+    request<Workspace>(`/api/note-types/${noteTypeId}/ankidesign`, {
+      method: 'POST',
+      body: JSON.stringify({ path, field_mapping: fieldMapping, overwrite_media: overwriteMedia }),
+    }),
   exportUrl: (kind: 'tsv' | 'design' | 'bundle' | 'media' | 'project', noteTypeId: string, mediaType?: MediaKind, storedNames?: string[]) => {
     const params = new URLSearchParams()
     if (kind === 'media' && mediaType) params.set('media_type', mediaType)

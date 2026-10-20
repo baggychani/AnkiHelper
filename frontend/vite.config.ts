@@ -12,6 +12,7 @@ export default defineConfig({
   server: { port: 1420, strictPort: true },
   envPrefix: ['VITE_', 'TAURI_'],
   test: {
+    setupFiles: ['./test-setup.ts'],
     // jsdom pulls in undici; the default fork pool breaks on newer Node runners.
     pool: 'threads',
   },
